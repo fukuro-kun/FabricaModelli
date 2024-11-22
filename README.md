@@ -62,7 +62,33 @@ FabricaModelli/
 
 ## 🚀 Installation
 
-Die Installation ist modellspezifisch. Bitte folgen Sie den Anleitungen in der jeweiligen Dokumentation:
+### 1. Umgebungsvariablen einrichten
+
+1. Kopieren Sie `.env.template` zu `.env`:
+   ```bash
+   cp .env.template .env
+   ```
+
+2. Passen Sie die Pfade in `.env` an Ihr System an:
+   ```bash
+   # Beispiel für die .env
+   BASE_DIR=/media/ihr_username/pfad/zu/FabricaModelli
+   DATA_DIR=${BASE_DIR}/training/data
+   MODEL_DIR=${BASE_DIR}/training/models
+   LOG_DIR=${BASE_DIR}/training/logs
+   CONFIG_DIR=${BASE_DIR}/training/scripts
+   ```
+
+Die Umgebungsvariablen werden von allen Skripten verwendet, um die korrekten Pfade zu finden:
+- `BASE_DIR`: Hauptverzeichnis des Projekts
+- `DATA_DIR`: Speicherort für Trainingsdaten
+- `MODEL_DIR`: Speicherort für trainierte Modelle
+- `LOG_DIR`: Verzeichnis für Logs
+- `CONFIG_DIR`: Verzeichnis für Konfigurationsdateien
+
+### 2. Modellspezifische Installation
+
+Die weitere Installation ist modellspezifisch. Bitte folgen Sie den Anleitungen in der jeweiligen Dokumentation:
 
 - [📚 Whisper Training Setup](whisper/docs/training.md#1-einrichtung-der-umgebung)
 - [🔧 Whisper Konvertierung Setup](whisper/docs/conversion.md#1-vorbereitung-der-konvertierung)

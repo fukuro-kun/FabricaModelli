@@ -49,6 +49,9 @@ Thumbs.db
 
 # Project specific
 datasets/
+training/data/
+training/models/
+training/logs/
 *.wav
 *.mp3
 *.flac
@@ -61,6 +64,20 @@ datasets/
 *.txt
 !requirements.txt
 !requirements_*.txt
+*.cache
+cache/
+.cache/
+*.arrow
+*.bin
+*.h5
+*.hdf5
+*.pkl
+*.npz
+*.npy
+
+# Temp files
+tmp/
+temp/
 
 # Cleanup script
 cleanup_realtimestt.sh

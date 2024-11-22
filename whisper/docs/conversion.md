@@ -1,4 +1,4 @@
-# Konvertierung des deutschen Whisper-Modells für RealtimeSTT
+# Konvertierung des deutschen Whisper-Modells in ein spezialisiertes Faster-Whisper-Modell
 
 Nach erfolgreichem Training unseres spezialisierten deutschen Whisper-Modells ist der nächste wichtige Schritt die Optimierung für den Produktiveinsatz. Während das trainierte Modell hervorragende Erkennungsraten bietet, benötigt es für Echtzeit-Anwendungen eine spezielle Aufbereitung. Die Konvertierung zu Faster-Whisper mittels CTranslate2 ermöglicht deutlich schnellere Inferenzzeiten bei gleichbleibender Genauigkeit.
 
@@ -15,15 +15,17 @@ pip install ctranslate2 faster-whisper evaluate
 ### 1.2 Verzeichnisstruktur
 
 ```
-/media/fukuro/raid5/RealtimeSTT/
-├── training/
-    ├── models/
-    │   ├── whisper-large-v3-turbo-german/        # Trainiertes Modell (SafeTensors)
-    │   ├── whisper-large-v3-turbo-german-final/  # Konvertiertes Modell (.bin)
-    │   └── faster-whisper-large-v3-turbo-german/ # Finales Faster-Whisper-Modell
-    └── scripts/
-        ├── convert_model.py         # SafeTensors zu .bin Konvertierung
-        └── convert_to_faster.py     # .bin zu Faster-Whisper Konvertierung
+${BASE_DIR}/
+├── models/
+│   ├── whisper-large-v3-turbo-german/        # Trainiertes Modell (SafeTensors)
+│   │   ├── checkpoint-40000/
+│   │   └── final/
+│   └── faster-whisper-large-v3-turbo-german/ # Finales Faster-Whisper-Modell
+├── scripts/
+│   ├── convert_model.py         # SafeTensors zu .bin Konvertierung
+│   └── convert_to_faster.py     # .bin zu Faster-Whisper Konvertierung
+└── tests/
+    └── test_model.py
 ```
 
 ## 2. Konvertierungsprozess
@@ -33,8 +35,8 @@ pip install ctranslate2 faster-whisper evaluate
 Dieser Schritt ist notwendig, da CTranslate2 nur .bin Format unterstützt.
 
 ```bash
-cd /media/fukuro/raid5/RealtimeSTT
-python training/scripts/convert_model.py
+cd ${BASE_DIR}
+python scripts/convert_model.py
 ```
 
 ### 2.2 Schritt 2: Konvertierung zu Faster-Whisper
@@ -42,7 +44,7 @@ python training/scripts/convert_model.py
 Optimiert das Modell für schnelle Inferenz und validiert die deutsche Sprachkonfiguration.
 
 ```bash
-python training/scripts/convert_to_faster.py
+python scripts/convert_to_faster.py
 ```
 
 ## 3. Konvertierungsparameter
@@ -72,7 +74,7 @@ python training/scripts/convert_to_faster.py
 Nach erfolgreicher Konvertierung sollten folgende Dateien existieren:
 
 ```
-training/models/faster-whisper-large-v3-turbo-german/
+${BASE_DIR}/models/faster-whisper-large-v3-turbo-german/
 ├── model.bin
 ├── tokenizer.json
 └── preprocessor_config.json

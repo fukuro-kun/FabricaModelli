@@ -37,6 +37,10 @@ import torch.distributed as dist
 import time
 import numpy as np
 import librosa
+from dotenv import load_dotenv
+
+# Lade Umgebungsvariablen aus .env
+load_dotenv()
 
 # Imports für Whisper und Datasets
 from datasets import load_dataset, Audio
@@ -57,11 +61,11 @@ import evaluate
 from tensorboard import program
 
 # Konfiguration der Pfade
-BASE_DIR = Path("/media/fukuro/raid5/RealtimeSTT")
-DATA_DIR = BASE_DIR / "training/data"
-MODEL_DIR = BASE_DIR / "training/models"
-LOG_DIR = BASE_DIR / "training/logs"
-CONFIG_FILE = BASE_DIR / "training/scripts/model_config.json"
+BASE_DIR = Path(os.getenv('BASE_DIR'))
+DATA_DIR = Path(os.getenv('DATA_DIR', BASE_DIR / "training/data"))
+MODEL_DIR = Path(os.getenv('MODEL_DIR', BASE_DIR / "training/models"))
+LOG_DIR = Path(os.getenv('LOG_DIR', BASE_DIR / "training/logs"))
+CONFIG_FILE = Path(os.getenv('CONFIG_DIR', BASE_DIR / "training/scripts")) / "model_config.json"
 
 # Modell-Konfiguration
 MODEL_CONFIG = {

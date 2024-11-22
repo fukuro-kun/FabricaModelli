@@ -19,7 +19,7 @@ Wir trainieren ein deutsches Spracherkennungsmodell basierend auf OpenAIs Whispe
 ## Verzeichnisstruktur
 
 ```
-/media/fukuro/raid5/RealtimeSTT/
+${BASE_DIR}/
 ├── training/
 │   ├── data/          # Dataset und Cache
 │   ├── models/        # Trainierte Modelle
@@ -33,15 +33,33 @@ Wir trainieren ein deutsches Spracherkennungsmodell basierend auf OpenAIs Whispe
 
 ## 1. Einrichtung der Umgebung
 
-### 1.1 Python Virtual Environment erstellen
+### 1.1 Konfiguration der Umgebungsvariablen
+
+Kopieren Sie die `.env.template` Datei zu `.env` und passen Sie die Pfade an:
 
 ```bash
-cd /media/fukuro/raid5/RealtimeSTT
+cp .env.template .env
+```
+
+Bearbeiten Sie die `.env` Datei und setzen Sie die korrekten Pfade:
+
+```env
+BASE_DIR=${BASE_DIR}
+DATA_DIR=${BASE_DIR}/training/data
+MODEL_DIR=${BASE_DIR}/training/models
+LOG_DIR=${BASE_DIR}/training/logs
+CONFIG_DIR=${BASE_DIR}/training/scripts
+```
+
+### 1.2 Python Virtual Environment erstellen
+
+```bash
+cd ${BASE_DIR}
 python3 -m venv training-venv
 source training-venv/bin/activate
 ```
 
-### 1.2 Benötigte Pakete installieren
+### 1.3 Benötigte Pakete installieren
 
 Die Datei `training/requirements_training.txt` enthält alle notwendigen Abhängigkeiten für das Training:
 
@@ -70,7 +88,7 @@ pip install torch==2.5.1+cu118 torchaudio==2.5.1+cu118 --index-url https://downl
 pip install -r training/requirements_training.txt
 ```
 
-### 1.3 Installation verifizieren
+### 1.4 Installation verifizieren
 
 ```bash
 # CUDA-Verfügbarkeit prüfen
@@ -100,7 +118,7 @@ Das Training-Skript setzt automatisch wichtige Umgebungsvariablen für optimale 
 Training starten:
 
 ```bash
-cd /media/fukuro/raid5/RealtimeSTT
+cd ${BASE_DIR}
 torchrun --nproc_per_node=2 ./training/scripts/train_german_model.py
 ```
 
@@ -177,8 +195,8 @@ Whisper erwartet Audio-Input mit 16kHz Sampling Rate. Unser Dataset (flozi00/asr
 
 ### 6.4 Log-Dateien
 
-- Training-Logs: /media/fukuro/raid5/RealtimeSTT/training/logs/training.log
-- TensorBoard-Logs: /media/fukuro/raid5/RealtimeSTT/training/models/whisper-large-v3-turbo-german
+- Training-Logs: ${BASE_DIR}/training/logs/training.log
+- TensorBoard-Logs: ${BASE_DIR}/training/models/whisper-large-v3-turbo-german
 
 ## 7. Fehlerbehebung
 
@@ -193,7 +211,7 @@ Whisper erwartet Audio-Input mit 16kHz Sampling Rate. Unser Dataset (flozi00/asr
 Bei Unterbrechung:
 
 ```bash
-cd /media/fukuro/raid5/RealtimeSTT
+cd ${BASE_DIR}
 torchrun --nproc_per_node=2 ./training/scripts/train_german_model.py
 ```
 
@@ -220,7 +238,7 @@ Die Evaluation unseres Modells erfolgt auf zwei Ebenen:
 ### 8.3 Modell exportieren
 
 Modell wird gespeichert in:
-/media/fukuro/raid5/RealtimeSTT/training/models/whisper-large-v3-turbo-german
+${BASE_DIR}/training/models/whisper-large-v3-turbo-german
 
 Checkpoints in Unterverzeichnissen
 

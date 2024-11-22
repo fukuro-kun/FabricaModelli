@@ -17,12 +17,16 @@ import json
 import logging
 from pathlib import Path
 from model_utils import get_model_path
+from dotenv import load_dotenv
+
+# Lade Umgebungsvariablen
+load_dotenv()
 
 # Konfiguration der Pfade
-BASE_DIR = Path("/media/fukuro/raid5/RealtimeSTT")
-MODEL_DIR = BASE_DIR / "training/models"
-LOG_DIR = BASE_DIR / "training/logs"
-CONFIG_FILE = BASE_DIR / "training/scripts/model_config.json"
+BASE_DIR = Path(os.getenv('BASE_DIR'))
+MODEL_DIR = BASE_DIR / os.getenv('MODEL_DIR')
+LOG_DIR = BASE_DIR / os.getenv('LOG_DIR')
+CONFIG_FILE = BASE_DIR / os.getenv('CONFIG_FILE')
 
 # Logging-Konfiguration
 logging.basicConfig(
