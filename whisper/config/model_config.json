@@ -1,0 +1,5 @@
+{
+  "base_name": "whisper-large-v3-turbo-german",
+  "final_name": "whisper-large-v3-turbo-german-final",
+  "faster_name": "faster-whisper-large-v3-turbo-german"
+}

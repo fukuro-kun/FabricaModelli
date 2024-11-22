@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.env
+
+# Training specific
+models/
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.bin
+wandb/
+logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Project specific
+datasets/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.json
+!model_config.json
+*.csv
+*.tsv
+*.txt
+!requirements.txt
+!requirements_*.txt
+
+# Cleanup script
+cleanup_realtimestt.sh
+
+{{ ... }}
+# Original HTML-Dokumentation (für Trilium)
+whisper/docs/*.html
