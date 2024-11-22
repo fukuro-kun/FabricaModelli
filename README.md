@@ -9,19 +9,36 @@
 
 *Eine Werkstatt für das Training und die Optimierung von KI-Modellen*
 
-> ℹ️ **Wartungshinweis**: Dieses Repository wird aus Zeitgründen passiv gewartet. Issues und Pull Requests werden gelesen, aber Antworten können einige Zeit in Anspruch nehmen. Vielen Dank für Ihr Verständnis!
+> ℹ️ **Aktueller Status**: Dieses Repository befindet sich in der Entwicklung. Derzeit ist das Training eines spezialisierten deutschen Whisper-Modells implementiert. Weitere Modelle und Werkzeuge sind in Planung.
 
 ## 🎯 Über das Projekt
 
 FabricaModelli ist eine Sammlung von Tools und Skripten für das Training und die Optimierung verschiedener KI-Modelle. Der Name kommt aus dem Lateinischen und bedeutet "Modell-Werkstatt" - ein Ort, an dem Modelle mit Präzision und Sorgfalt "geschmiedet" werden.
 
-## 🤖 Aktuelle Modelle
+### 🎙️ Aktueller Fokus: Deutsches Whisper-Modell
+
+Das erste fertiggestellte Werkzeug ist ein spezialisiertes Trainings-Framework für deutsche Spracherkennung basierend auf OpenAI's Whisper. 
+
+**Hauptmerkmale:**
+- Training eines deutschen Whisper-Modells mit State-of-the-Art Performance
+- Optimiert für Echtzeit-Transkription
+- Trainiert auf dem flozi00/asr-german-mixed Dataset (970.064 Trainingssätze)
+- Ziel-WER (Word Error Rate): 4.77% oder besser
+- Multi-GPU Training mit Gradient Checkpointing für effiziente Ressourcennutzung
+
+## 🤖 Implementierte Modelle
 
 ### Whisper 🎙️
-- Spezialisiertes deutsches Spracherkennungsmodell
-- Basierend auf Whisper Large V3
-- Optimiert für Echtzeit-Transkription
-- Benchmark WER: 4.77%
+- **Status**: ✅ Trainings-Pipeline implementiert
+- **Basis**: Whisper Large V3
+- **Datensatz**: flozi00/asr-german-mixed
+  - 970.064 Trainingssätze
+  - 9.799 Testsätze
+- **Features**:
+  - Optimiert für Echtzeit-Transkription
+  - Multi-GPU Training Support
+  - Gradient Checkpointing
+  - FP16 Training
 - [📚 Trainings-Guide](whisper/docs/training.md)
 - [🔧 Konvertierungs-Guide](whisper/docs/conversion.md)
 
