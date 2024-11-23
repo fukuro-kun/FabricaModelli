@@ -157,4 +157,6 @@ torchrun --nproc_per_node=2 whisper/src/train_german_model.py
 
 ## Lizenz
 
-[MIT License](LICENSE)
+[GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0.html)
+
+Dieses Projekt ist unter der GPLv3 lizenziert - siehe die [LICENSE](LICENSE) Datei für Details.
