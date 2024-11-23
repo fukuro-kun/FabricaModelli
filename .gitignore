@@ -65,7 +65,6 @@ training/logs/
 !requirements.txt
 !requirements_*.txt
 *.cache
-cache/
 .cache/
 *.arrow
 *.bin
@@ -74,10 +73,12 @@ cache/
 *.pkl
 *.npz
 *.npy
+archive/
 
 # Temp files
 tmp/
 temp/
+cache
 
 # Cleanup script
 cleanup_realtimestt.sh

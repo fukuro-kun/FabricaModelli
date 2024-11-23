@@ -4,160 +4,485 @@ Spracherkennung in Echtzeit stellt besondere Anforderungen an die Genauigkeit un
 
 Dieser Guide dokumentiert den Prozess des Trainings eines solchen spezialisierten deutschen Whisper-Modells. Mit dem Ziel, die aktuelle Benchmark-Wortfehlerrate von 4.77% zu erreichen oder zu übertreffen, nutzen wir einen sorgfältig kuratierten deutschen Datensatz und moderne Trainingstechniken. Der Guide ist dabei so gestaltet, dass das Training auch auf Consumer-Hardware durchführbar ist - ein wichtiger Aspekt für die Reproduzierbarkeit und Weiterentwicklung des Modells.
 
-## Übersicht
+## 1. Übersicht und Systemvoraussetzungen
 
-Wir trainieren ein deutsches Spracherkennungsmodell basierend auf OpenAIs Whisper-Architektur, um die Echtzeit-Spracherkennung in RealtimeSTT zu verbessern. Unser Ziel ist es, die Wortfehlerrate (WER) von 4.77% des aktuellen Benchmarks (primeline-whisper-large-v3-turbo-german) zu erreichen oder zu übertreffen. Wir nutzen den flozi00/asr-german-mixed Datensatz mit 970,064 Trainings- und 9,799 Testbeispielen. Der Trainingsprozess läuft auf zwei RTX 4060 Ti GPUs und nutzt moderne Techniken wie Gradient Checkpointing und fp16 Training, um trotz der Hardware-Limitierungen (16GB VRAM pro GPU) effizient zu sein. Die gesamte Trainingszeit beträgt etwa 24-30 Stunden für 2 Epochen (40,000 Steps), wobei wir besonders auf eine effiziente Nutzung der verfügbaren Ressourcen (6 CPU-Kerne, 128GB RAM) achten.
+### 1.1 Projekt-Übersicht
 
-## Systemvoraussetzungen
+Wir trainieren ein deutsches Spracherkennungsmodell basierend auf OpenAIs Whisper-Architektur, um die Echtzeit-Spracherkennung in RealtimeSTT zu verbessern. Unser Ziel ist es, die Wortfehlerrate (WER) von 4.77% des aktuellen Benchmarks (primeline-whisper-large-v3-turbo-german) zu erreichen oder zu übertreffen. Wir nutzen den flozi00/asr-german-mixed Datensatz mit 970,064 Trainings- und 9,799 Testbeispielen.
 
-- NVIDIA GPU(s) mit mindestens 16GB VRAM
-- CUDA >= 11.8
-- Python 3.12
-- Mindestens 250GB freier Speicherplatz
-- Mindestens 32GB RAM
+### 1.2 Hardware-Anforderungen
 
-## Verzeichnisstruktur
+- 2× NVIDIA GPU mit CUDA-Support
+  - VRAM: 16GB pro GPU
+  - Multi-GPU Training über NCCL
+  - Unterstützung für Mixed Precision (FP16)
+- 64GB RAM
+- 6 CPU Cores
+- ~4TB Speicherplatz
+  - ~700GB Dataset Cache
+  - ~100GB Feature Cache
+  - ~1.5TB HuggingFace Cache
+  - ~1.5TB Zusätzlicher Speicher
+
+
+### 1.3 Verzeichnisstruktur
 
 ```
 ${BASE_DIR}/
-├── training/
-│   ├── data/          # Dataset und Cache
-│   ├── models/        # Trainierte Modelle
-│   ├── logs/          # Trainings-Logs
-│   ├── requirements_training.txt  # Trainings-Abhängigkeiten
-│   └── scripts/       # Training Skripte
-│       ├── train_german_model.py
-│       ├── convert_model.py
-│       └── convert_to_faster.py
+├── cache/                    # Zentrales Cache-Verzeichnis
+│   ├── huggingface/         # HuggingFace Cache
+│   ├── datasets/            # Dataset Cache
+│   ├── audio/              # Audio Cache
+│   └── features/           # Feature Cache
+├── models/
+│   └── whisper-large-v3-turbo-german/  # Trainiertes Modell
+├── logs/                    # Training & Konvertierung Logs
+└── whisper/
+    ├── src/                # Quellcode
+    ├── config/             # Konfigurationsdateien
+    └── docs/               # Dokumentation
 ```
 
-## 1. Einrichtung der Umgebung
+## 2. Setup und Installation
 
-### 1.1 Konfiguration der Umgebungsvariablen
+### 2.1 Python-Umgebung einrichten
 
-Kopieren Sie die `.env.template` Datei zu `.env` und passen Sie die Pfade an:
+Für das Training benötigen wir eine isolierte Python-Umgebung. Dies verhindert Konflikte zwischen Paketen und ermöglicht eine saubere Installation:
 
 ```bash
-cp .env.template .env
+# Python Virtual Environment erstellen
+python -m venv venv
+
+# Umgebung aktivieren
+source venv/bin/activate  # Linux
+
+# Pip upgraden (wichtig für moderne Dependency Resolution)
+pip install --upgrade pip setuptools wheel
 ```
 
-Bearbeiten Sie die `.env` Datei und setzen Sie die korrekten Pfade:
+### 2.2 Dependencies installieren
 
-```env
-BASE_DIR=${BASE_DIR}
-DATA_DIR=${BASE_DIR}/training/data
-MODEL_DIR=${BASE_DIR}/training/models
-LOG_DIR=${BASE_DIR}/training/logs
-CONFIG_DIR=${BASE_DIR}/training/scripts
-```
-
-### 1.2 Python Virtual Environment erstellen
+Die Requirements-Datei enthält alle notwendigen Pakete mit exakten Versionen für Reproduzierbarkeit:
 
 ```bash
-cd ${BASE_DIR}
-python3 -m venv training-venv
-source training-venv/bin/activate
+# Basis-Dependencies
+pip install -r requirements.txt
+
+# PyTorch mit CUDA-Support (falls nicht in requirements.txt)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 ```
 
-### 1.3 Benötigte Pakete installieren
+### 2.3 Projektstruktur einrichten
 
-Die Datei `training/requirements_training.txt` enthält alle notwendigen Abhängigkeiten für das Training:
-
-- **Core Dependencies**:
-  - torch==2.5.1 - PyTorch mit CUDA Support
-  - transformers==4.46.3 - Hugging Face Transformers
-  - datasets==3.1.0 - Dataset Handling
-  - accelerate==1.1.1 - Distributed Training
-  - tokenizers==0.20.3 - Tokenisierung
-  - tensorboard==2.18.0 - Training Monitoring
-
-- **Audio Processing**:
-  - librosa - Audio Verarbeitung
-  - soundfile - Audio I/O
-
-Installation der Pakete:
+Das Training benötigt eine spezifische Verzeichnisstruktur. Diese wird automatisch erstellt, wenn sie nicht existiert:
 
 ```bash
-# Upgrade pip
-pip install --upgrade pip
+# Basis-Verzeichnis setzen (anpassen an Ihren Pfad)
+export BASE_DIR="/pfad/zum/projekt"
 
-# PyTorch mit CUDA 11.8 Support installieren
-pip install torch==2.5.1+cu118 torchaudio==2.5.1+cu118 --index-url https://download.pytorch.org/whl/cu118
-
-# Trainings-Abhängigkeiten aus requirements_training.txt installieren
-pip install -r training/requirements_training.txt
+# Unterverzeichnisse erstellen
+mkdir -p "${BASE_DIR}/cache/datasets"    # Dataset Cache
+mkdir -p "${BASE_DIR}/cache/huggingface" # HuggingFace Cache
+mkdir -p "${BASE_DIR}/cache/audio"       # Verarbeitete Audio-Dateien
+mkdir -p "${BASE_DIR}/cache/features"    # Extrahierte Features
+mkdir -p "${BASE_DIR}/models"            # Trainierte Modelle
+mkdir -p "${BASE_DIR}/logs"              # Training Logs
 ```
 
-### 1.4 Installation verifizieren
+### 2.4 Umgebungsvariablen setzen
+
+Die Umgebungsvariablen steuern, wo das Training Daten speichert und lädt. Am besten in `.env` oder `.bashrc` speichern:
 
 ```bash
-# CUDA-Verfügbarkeit prüfen
-python -c "import torch; print('CUDA verfügbar:', torch.cuda.is_available())"
+# Projekt-Pfade
+export BASE_DIR="/pfad/zum/projekt"
+export MODEL_DIR="${BASE_DIR}/models"
+export LOG_DIR="${BASE_DIR}/logs"
+export CONFIG_DIR="${BASE_DIR}/config"
+export CACHE_DIR="${BASE_DIR}/cache"
 
-# TensorBoard-Installation prüfen
-python -c "import tensorboard; print('TensorBoard Version:', tensorboard.__version__)"
+# HuggingFace Cache (verhindert doppelte Downloads)
+export HF_HOME="${CACHE_DIR}/huggingface"
+export HF_DATASETS_CACHE="${CACHE_DIR}/datasets"
 ```
 
-## 2. Training-Skript vorbereiten
+## 3. Dataset und Datenverarbeitung
 
-### 2.1 Verzeichnisse erstellen
+### 3.1 Dataset-Spezifika
 
-```bash
-mkdir -p training/data training/models training/logs
+Das flozi00/asr-german-mixed Dataset wurde analysiert und hat folgende Eigenschaften:
+
+- **Struktur** (aus debug_dataset.py):
+  ```python
+  Dataset({
+      features: ['audio', 'transkription', 'source'],
+      num_rows: 970000
+  })
+  
+  Features = {
+      'audio': Audio(sampling_rate=16000, mono=True, decode=True),
+      'transkription': Value(dtype='string'),
+      'source': Value(dtype='string')
+  }
+  
+  # Beispiel-Eintrag:
+  {
+      "audio": {
+          'path': 'common_voice_de_21815857.mp3',
+          'array': np.ndarray(shape=(62208,), dtype=float32),
+          'sampling_rate': 16000
+      },
+      "transkription": "Es geht um das Fairplay im Wettbewerb zwischen den Mannschaften.",
+      "source": "common_voice_19_0"
+  }
+  ```
+
+- **Audio-Eigenschaften**:
+  - Sampling-Rate: 16kHz (Whisper-Standard)
+  - Format: NumPy-Array (float32)
+  - Mono-Audio
+  - Beispiel-Shape: (62208,) ≈ 3.9 Sekunden
+  - Durchschnittliche Länge: ~4 Sekunden
+
+- **Verarbeitung im Training**:
+  - Automatische Extraktion von Audio-Array und Sampling-Rate
+  - Resampling nur wenn nötig (bereits korrekte Rate)
+  - Robuste Fehlerbehandlung für verschiedene Audio-Formate
+  - Effiziente Feature-Extraktion mit Caching
+  - Quelle ('source') wird für Training nicht benötigt
+
+- **Cache-Struktur**:
+  - Dataset Cache: ${CACHE_DIR}/datasets/
+  - HuggingFace Cache: ${CACHE_DIR}/huggingface/
+  - Audio Cache: ${CACHE_DIR}/audio/
+  - Feature Cache: ${CACHE_DIR}/features/
+
+### 3.2 Datenverarbeitungspipeline
+
+Das Training durchläuft mehrere aufeinanderfolgende Datenverarbeitungsphasen, die jeweils unterschiedliche Ressourcen nutzen und verschiedene Optimierungen ermöglichen:
+
+#### Phase 1: Dataset Download und Extraktion
+- **Download der Rohdaten**
+  - HuggingFace Datasets lädt die komprimierten Datensatz-Dateien herunter
+  - Fortschritt wird in `~/.cache/huggingface/datasets` gespeichert
+  - Sehr schnell (~500-600 files/s), da nur Metadaten verarbeitet werden
+
+- **Extraktion und Validierung**
+  - Überprüfung der Dateiintegrität
+  - Entpacken der komprimierten Archive
+  - Erstellen eines Datensatz-Index für schnellen Zugriff
+
+#### Phase 2: Dataset Generation
+- **Split-Generierung** (~3,500 examples/s)
+  - Aufteilen in Trainings- und Testdaten
+  - Erstellung effizienter Datenstrukturen für schnellen Zugriff
+  - Parallelisierte Verarbeitung auf CPU-Kernen
+  - Speicherung im Arrow-Format für optimale Performance
+
+- **Metadaten-Verarbeitung**
+  - Extraktion von Audio-Längen und Transkriptionen
+  - Erstellung von Feature-Maps für effizientes Training
+  - Caching von Zwischenergebnissen für spätere Durchläufe
+
+#### Phase 3: Audio-Vorverarbeitung
+- **Feature-Extraktion** (~100-150 examples/s)
+  - CPU-intensive Verarbeitung der Audiodaten
+  - Resampling auf 16kHz (falls nötig)
+  - Mel-Spektrogramm-Berechnung
+  - Normalisierung und Tokenisierung der Transkriptionen
+
+- **Caching-Strategie**
+  - Zwischenspeicherung verarbeiteter Features auf SSD
+  - Separate Cache-Verzeichnisse für verschiedene Verarbeitungsstufen:
+    ```
+    ~/.cache/huggingface/         # Dataset und Modell-Cache
+    ~/.cache/whisper/audio/       # Verarbeitete Audiodaten
+    ~/.cache/whisper/features/    # Extrahierte Features
+    ```
+
+#### Phase 4: Batch-Vorbereitung
+- **Dynamisches Batching**
+  - Gruppierung ähnlich langer Sequenzen
+  - Padding und Maskierung für effizientes Training
+  - Verteilung der Batches auf verfügbare GPUs
+
+- **Memory Management**
+  - Streaming-Verarbeitung großer Datasets
+  - Garbage Collection nach Batch-Verarbeitung
+  - Optimierte Buffer-Größen für verschiedene Hardware-Konfigurationen
+
+#### Optimierungen und Best Practices
+- Nutzung von 5 CPU-Kernen für Parallelverarbeitung (1 Kern für System)
+- SSD-Caching für schnellen Zugriff auf verarbeitete Daten
+- Verteiltes Training über NCCL-Backend
+- Automatische Anpassung der Batch-Größe basierend auf verfügbarem VRAM
+
+#### Performance-Monitoring
+- Fortschrittsbalken mit Verarbeitungsgeschwindigkeit
+- Logging von Ressourcenauslastung
+- Automatische Erkennung von Bottlenecks
+- Speicherverbrauch-Tracking für CPU und GPU
+
+Diese mehrstufige Pipeline ermöglicht es uns, den großen Datensatz (970,064 Samples) effizient zu verarbeiten und gleichzeitig die verfügbaren Hardware-Ressourcen optimal zu nutzen. Die Caching-Strategie stellt sicher, dass aufwändige Berechnungen nur einmal durchgeführt werden müssen.
+
+### 3.3 Cache-Struktur und Verhalten
+
+#### 3.3.1 HuggingFace Cache-Architektur
+
+Der HuggingFace Cache verwendet eine Git-ähnliche BLOB-basierte Struktur:
+
+```
+huggingface/
+├── models--[org]--[model]/     # z.B. models--openai--whisper-large-v3-turbo
+│   ├── snapshots/             # Verschiedene Modellversionen
+│   │   └── [commit-hash]/     # Spezifische Version
+│   │       ├── config.json
+│   │       └── model.safetensors
+│   └── refs/                  # Referenzen auf aktuelle Version
+│       └── main              # Pointer auf aktuellen Snapshot
+├── datasets--[org]--[dataset]/ # z.B. datasets--flozi00--asr-german-mixed
+│   ├── snapshots/            # Dataset-Versionen
+│   │   └── [commit-hash]/    # Spezifische Version
+│   │       ├── dataset_info.json
+│   │       └── [split]/      # train, test, etc.
+│   └── refs/                 # Referenzen auf aktuelle Version
+└── .locks/                   # Sperrdateien für parallelen Zugriff
 ```
 
-## 3. Training starten
+Vorteile dieser Struktur:
+- Deduplizierung durch BLOB-Storage
+- Effiziente Updates (nur Delta-Downloads)
+- Robuster paralleler Zugriff
+- Einfache Versionierung
+- Optimierte Speichernutzung
 
-### 3.1 Multi-GPU Training starten
+#### 3.3.2 Worker Cache-Verhalten
 
-Das Training-Skript setzt automatisch wichtige Umgebungsvariablen für optimale Performance:
+Jeder Worker (Prozess) im parallelen Training:
+- Erstellt eigene temporäre Dateien
+- Cached Features separat
+- Behält Cache während der gesamten Verarbeitung
+- Bereinigt Cache nach Abschluss
 
-- `OMP_NUM_THREADS=1`: Optimiert OpenMP Threading
-- `TOKENIZERS_PARALLELISM=true`: Aktiviert Tokenizer Parallelisierung
+Speichernutzung pro Worker:
+```
+features/
+├── shared/                    # Gemeinsam genutzte Dateien
+│   ├── arrow/                # 271 Dateien × 506 MB ≈ 137 GB
+│   │   └── temp_[hash].arrow
+│   └── parquet/              # 273 Dateien × 493 MB ≈ 135 GB
+│       └── temp_[hash].parquet
+├── worker_1/                 # Worker-spezifische Caches
+│   └── cache/               # Wächst während Verarbeitung
+│       └── processed_[hash] # 0 GB → ~270 GB
+├── worker_2/
+│   └── ...
+└── worker_10/
+    └── ...
+
+Gesamt-Speicherbedarf:
+- Gemeinsam genutzte Dateien:
+  - Arrow-Dateien: 271 × 506 MB ≈ 137 GB
+  - Parquet-Dateien: 273 × 493 MB ≈ 135 GB
+  - → ~272 GB shared Storage
+
+- Pro Worker:
+  - Wachsender Cache: 0 GB → ~270 GB
+  - → ~270 GB pro Worker bei voller Auslastung
+
+Systemweite Auslastung:
+- Shared Storage: ~272 GB (Arrow + Parquet)
+- Worker Caches: 10 × 270 GB ≈ 2.7 TB
+- Dataset Cache: [noch zu ermitteln]
+- → Spitzenlast: >3 TB während der Verarbeitung
+```
+
+**Kritische Herausforderungen**:
+1. **Explosives Cache-Wachstum**:
+   - Jeder Worker erzeugt eigene temporäre Dateien
+   - Dateien werden während der Verarbeitung nicht gelöscht
+   - Cache wächst kontinuierlich bis zum Verarbeitungsende
+
+2. **Ressourcen-Engpässe**:
+   - Speicherplatz auf System-SSD schnell erschöpft
+   - I/O-Bottlenecks durch parallele Schreibzugriffe
+   - Hohe RAM-Auslastung durch Datenpufferung
+
+3. **Performance-Probleme**:
+   - Verlangsamung bei vollem Speicher
+   - Potenzielle System-Instabilität
+   - Training kann bei vollem Speicher abstürzen
+
+#### Implementierte Lösungen
+
+Um diese Herausforderungen zu bewältigen:
+
+1. **Cache-Verlagerung**:
+   - Alle Caches auf RAID5-System verschoben
+   - Bessere I/O-Performance
+   - Mehr verfügbarer Speicherplatz
+
+2. **Worker-Optimierung**:
+   ```python
+   train_dataset.map(
+       prepare_dataset,
+       num_proc=5,              # 5 Worker pro GPU
+       batch_size=32,           # 32 * 16bit * 480000 Samples ≈ 30MB pro Batch
+       writer_batch_size=1000,  # 1000 * 135MB ≈ 135GB Arrow/Parquet Dateien
+   )
+   ```
+
+3. **Monitoring und Cleanup**:
+   - Regelmäßige Cache-Bereinigung
+   - Speicherverbrauch-Überwachung
+   - Automatische Notfall-Bereinigung
+
+#### Lessons Learned
+
+- Worker-Anzahl hat direkten Einfluss auf Speicherverbrauch
+- Große `writer_batch_size` reduziert Anzahl temporärer Dateien
+- RAID-System essentiell für große Datasets
+- Regelmäßiges Monitoring unerlässlich
+
+### 3.4 Herausforderungen mit dem Cache-System
+
+#### Speicherproblematik
+
+Die parallele Verarbeitung führt zu erheblichen Speicheranforderungen:
+
+```
+{{ ... }}
+```
+
+### 3.5 Batch-Verarbeitung
+
+Die Batch-Verarbeitung ist ein kritischer Aspekt des Trainings:
+
+- **Batch-Dimensionen**: 
+  - Alle Tensoren behalten ihre Batch-Dimension bei
+  - Dynamisches Padding auf die längste Sequenz im Batch
+  - Automatische Handhabung unterschiedlicher Sequenzlängen
+
+- **Feature-Extraktion**:
+  - Robuste Audio-Verarbeitung
+  - Fehlertolerante Feature-Extraktion
+  - Optimierte Cache-Nutzung
+  - Verbesserte Fehlerbehandlung
+
+### 3.6 Zukünftig geplante Features
+
+**Behandlung langer Audio-Dateien** (In Entwicklung):
+- Intelligente Verarbeitung von Audio-Dateien > 30 Sekunden
+- Keine Kürzung zur Vermeidung von Audio-Text-Diskrepanzen
+- Experimentelle Modi für verschiedene Anwendungsfälle
+
+## 4. Training
+
+### 4.1 Training starten
+
+Das Training-Skript setzt folgende Umgebungsvariablen:
+- Distributed Training Konfiguration (automatisch durch torchrun)
+- Dataset und Cache-Pfade aus .env
+- CUDA Device Management
 
 Training starten:
-
 ```bash
 cd ${BASE_DIR}
-torchrun --nproc_per_node=2 ./training/scripts/train_german_model.py
+torchrun --nproc_per_node=2 ./whisper/train_german_model.py
 ```
 
-TensorBoard wird automatisch gestartet und ist unter `http://localhost:6006` erreichbar.
-
-## 3.2 Trainings-Prozess
+### 4.2 Trainings-Parameter und Prozess
 
 1. **Initialisierung**:
-   - TensorBoard startet automatisch
-   - Browser-Link wird angezeigt
-   - Prozess wird beim Trainingsende automatisch beendet
+   - Multi-GPU Setup mit NCCL Backend
+   - TensorBoard-Start auf Hauptprozess
+   - Dataset Cache-Konfiguration
+   - Distributed Training Synchronisation
 
 2. **Datenvorbereitung**:
-   - Normalisierung auf 16kHz Sampling Rate
-   - Feature-Extraktion mit Whisper Processor
-   - Vorbereitung der Transkriptionen
-   - Parallele Verarbeitung mit 5 Prozessen (1 Kern für System reserviert)
+   - Parallele Verarbeitung (nur Hauptprozess)
+   - Cache-Wiederverwendung wenn möglich
+   - Feature-Extraktion und Caching
    - Batch-Größe: 48 für optimale Balance
-   - Automatisches Caching der verarbeiteten Features (Arrow-Format)
-   - Cache-Speicherort: training/data/cache/
 
 3. **Training**:
    - Batch-Größe: 6 pro GPU
    - Gradient Accumulation: 4 Steps
    - Effektive Batch-Größe: 48 (6 × 4 × 2 GPUs)
-   - Checkpoints alle 2000 Schritte
-   - Evaluierung alle 2000 Schritte
+   - Learning Rate: 1e-5 mit Warmup
+   - Training Steps: 40,000 (~2 Epochen)
+   - Checkpoints: Alle 2000 Schritte
+   - Evaluierung: Alle 2000 Schritte
    - Dauer: ~20-24 Stunden
-   - Hohe GPU-Auslastung normal
 
-## 4. Audio-Verarbeitung
+4. **Optimierungen**:
+   - Gradient Checkpointing für VRAM-Effizienz
+   - FP16 Training
+   - Optimierte Cache-Nutzung
+   - Parallele Datenverarbeitung
 
-### 4.1 Sampling Rate und Resampling
+### 4.3 TensorBoard Monitoring
 
-Whisper erwartet Audio-Input mit 16kHz Sampling Rate. Unser Dataset (flozi00/asr-german-mixed) liegt bereits in diesem Format vor. Für andere Datasets implementieren wir hochqualitatives Resampling.
+TensorBoard wird automatisch gestartet und ist unter `http://localhost:6006` erreichbar.
 
-## 6. Training überwachen
+**Wichtige Metriken**:
+- **Loss**: Sollte kontinuierlich sinken
+- **WER (Word Error Rate)**:
+  - Ziel: 4.77% (Benchmark)
+  - Gut: < 7%
+  - Sehr gut: < 5%
+- **Learning Rate**: Startet bei 1e-5, Warmup in ersten 500 Schritten
+- **GPU Utilization**: Sollte bei ~95-100% liegen
 
-### 6.1 Wichtige Metriken in TensorBoard
+### 4.4 VRAM und Ressourcennutzung
+
+Die Speichernutzung wurde sorgfältig optimiert für unsere RTX 4060 Ti (16GB):
+
+**GPU-Setup**:
+- 2× NVIDIA GPU mit CUDA-Support
+  - VRAM: 16GB pro GPU
+  - Multi-GPU Training über NCCL
+  - Unterstützung für Mixed Precision (FP16)
+
+**VRAM-Nutzung pro GPU (16GB)**:
+- **Batch (6 Samples)**:
+  - ~1.5GB pro Sample
+  - 6 Samples × 1.5GB = ~9GB für Batch
+- **Modell & Gradienten**:
+  - Basis-Modell: ~3GB
+  - Gradienten & Optimizer States: ~4GB
+  - Gesamt: ~7GB
+- **System-Reserve**: ~400MB (Display Server etc.)
+
+**Optimierungen für effiziente VRAM-Nutzung**:
+1. **Gradient Checkpointing**:
+   - Aktiviert für alle Transformer-Layer
+   - VRAM-Einsparung: ~40%
+   - Leicht erhöhte Verarbeitungszeit (~10%)
+
+2. **Mixed Precision (FP16)**:
+   - Halbierter Speicherbedarf für Aktivierungen
+   - Numerische Stabilität durch dynamische Loss-Scaling
+   - Zusätzlicher Geschwindigkeitsvorteil auf modernen GPUs
+
+3. **Gradient Accumulation**:
+   - 4 Steps × 6 Samples × 2 GPUs = 48 effektive Batch-Size
+   - Ermöglicht größere effektive Batches ohne VRAM-Überlastung
+   - Wichtig für Trainings-Stabilität
+
+4. **Batch-Optimierung**:
+   - 6 Samples pro GPU ist optimal für:
+     - VRAM-Auslastung (~95%)
+     - Verarbeitungsgeschwindigkeit
+     - Trainings-Stabilität
+   - Größere Batches würden VRAM überlasten
+   - Kleinere Batches wären ineffizient
+
+## 5. Monitoring und Evaluation
+
+### 5.1 TensorBoard Metriken
+
+TensorBoard ist unter `http://localhost:6006` erreichbar mit folgenden Metriken:
 
 - **Loss**: Sollte kontinuierlich sinken
 - **WER (Word Error Rate)**:
@@ -167,92 +492,38 @@ Whisper erwartet Audio-Input mit 16kHz Sampling Rate. Unser Dataset (flozi00/asr
 - **Learning Rate**: Startet bei 1e-5, Warmup in ersten 500 Schritten
 - **GPU Utilization**: Sollte bei ~95-100% liegen
 
-### 6.2 Trainings-Phasen
-
-1. **Datenvorbereitung**:
-   - Dataset-Download und Caching
-   - Feature-Extraktion und Caching in Arrow-Format
-   - Dauer beim ersten Durchlauf: ~3-4 Stunden
-   - Dauer bei Cache-Nutzung: deutlich reduziert
-   - Hohe CPU-Auslastung nur beim ersten Durchlauf
-
-2. **Training**:
-   - 40,000 Schritte (~2 Epochen)
-   - Checkpoints alle 2000 Schritte
-   - Evaluierung alle 2000 Schritte
-   - Dauer: ~20-24 Stunden
-   - Hohe GPU-Auslastung normal
-
-### 6.3 VRAM-Nutzung
-
-- **Pro GPU (16GB)**:
-  - ~9GB: Batch (6 Samples × ~1.5GB)
-  - ~7GB: Modell, Gradienten, States
-- **Optimierungen**:
-  - Gradient Checkpointing: ~40% VRAM-Einsparung
-  - fp16: Halbierter Speicherbedarf
-  - Gradient Accumulation: 4 Steps = 48 effektive Batch Size
-
-### 6.4 Log-Dateien
+### 5.2 Log-Dateien
 
 - Training-Logs: ${BASE_DIR}/training/logs/training.log
 - TensorBoard-Logs: ${BASE_DIR}/training/models/whisper-large-v3-turbo-german
 
-## 7. Fehlerbehebung
+## 6. Fehlerbehebung
 
-### 7.1 Häufige Probleme
+### 6.1 Häufige Probleme
 
 - **Speicherprobleme**: Batch-Größe reduzieren
 - **CPU-Überlastung**: num_proc reduzieren
 - **GPU-Unterauslastung**: Batch-Größe erhöhen
 
-### 7.2 Training fortsetzen
+### 6.2 Training fortsetzen
 
 Bei Unterbrechung:
-
 ```bash
-cd ${BASE_DIR}
-torchrun --nproc_per_node=2 ./training/scripts/train_german_model.py
+python whisper/src/debug_dataset.py
 ```
 
 Dataset-Cache bleibt erhalten.
 
-## 8. Nach dem Training
+## 7. Zeitplan und Ressourcen
 
-### 8.1 Evaluation und Benchmarking
+### 7.1 Zeitplan
 
-Die Evaluation unseres Modells erfolgt auf zwei Ebenen:
+- Datenvorbereitung: ~3-4 Stunden
+- Training: ~20-24 Stunden
+- Benchmark-Evaluation: ~1-2 Stunden
+- Gesamtdauer: ~24-30 Stunden
 
-#### Integrierte Evaluation
-
-- **WER (Word Error Rate)**: Prozentsatz falsch erkannter Wörter
-  - Benchmark-Ziel: ≤ 4.77% (primeline-Modell)
-  - Berechnung: Levenshtein-Distanz zwischen Vorhersage und Referenz
-
-### 8.2 Modell validieren
-
-- WER auf Testset prüfen
-- Stichproben-Tests durchführen
-- Modell-Größe überprüfen
-
-### 8.3 Modell exportieren
-
-Modell wird gespeichert in:
-${BASE_DIR}/training/models/whisper-large-v3-turbo-german
-
-Checkpoints in Unterverzeichnissen
-
-## 9. Ressourcenverbrauch
-
-### 9.1 Speicherplatz
-
-- Dataset: ~136 GB
-- Feature-Cache: ~50-60 GB
-- Modell: ~5-10 GB
-- Logs & Checkpoints: ~20-30 GB
-- Gesamt: ~250 GB benötigt
-
-### 9.2 Hardware-Auslastung
+### 7.2 Hardware-Auslastung
 
 - GPU: 95-100% während Training
 - CPU:
@@ -260,17 +531,102 @@ Checkpoints in Unterverzeichnissen
   - Moderat während Training
 - RAM: ~32 GB empfohlen
 
-## 10. Zeitplan
+## 8. Nach dem Training
 
-- Datenvorbereitung: ~3-4 Stunden
-- Training: ~20-24 Stunden
-- Benchmark-Evaluation: ~1-2 Stunden
-- Gesamtdauer: ~24-30 Stunden
+### 8.1 Modell-Konvertierung
 
-## 11. Support
+Nach erfolgreichem Training muss das Modell für die Produktion konvertiert werden. Dieser Prozess ist ausführlich in der [Konvertierungs-Dokumentation](conversion.md) beschrieben. Die Konvertierung umfasst:
 
-Bei Problemen:
+1. Export des besten Checkpoints
+2. Konvertierung in das Faster-Whisper Format
+3. Quantisierung für schnellere Inferenz
+
+### 8.2 Aufräumen nach dem Training
+
+Das Training erzeugt verschiedene temporäre Dateien und Caches. Hier ist eine sichere Aufräum-Strategie:
+
+```bash
+# Alte Checkpoints archivieren oder löschen
+# (behalte nur den besten Checkpoint)
+mv ${MODEL_DIR}/checkpoint-* ${MODEL_DIR}/archive/
+
+# TensorBoard Logs komprimieren
+tar -czf ${LOG_DIR}/tensorboard_$(date +%Y%m%d).tar.gz ${LOG_DIR}/tensorboard/
+rm -rf ${LOG_DIR}/tensorboard/*
+
+# Feature Cache leeren (kann neu generiert werden)
+rm -rf ${CACHE_DIR}/features/*
+```
+
+**Wichtig**: Folgende Daten sollten aufbewahrt werden:
+- Bester Checkpoint (höchste Accuracy)
+- TensorBoard Logs (komprimiert)
+- Training Konfiguration
+- Evaluierungs-Ergebnisse
+
+Die automatische Evaluierung während des Trainings speichert bereits die besten Ergebnisse. Diese finden Sie in:
+- `${LOG_DIR}/metrics.json`: Alle Metriken im JSON-Format
+- `${LOG_DIR}/best_wer.txt`: Beste erreichte WER
+- TensorBoard Logs: Vollständiger Trainingsverlauf
+
+### 8.3 Nächste Schritte
+
+Für die Produktiv-Nutzung des Modells:
+1. Siehe [Konvertierungs-Dokumentation](conversion.md) für die Umwandlung in das Faster-Whisper Format
+2. Testen Sie das konvertierte Modell mit Beispiel-Audio
+3. Messen Sie die Inferenz-Geschwindigkeit
+4. Vergleichen Sie die WER mit dem Original-Modell
+
+## 9. Support und Wartung
+
+### 9.1 Monitoring
+
 1. Log-Dateien prüfen
 2. TensorBoard-Metriken analysieren
 3. GPU-Auslastung überwachen
 4. System-Ressourcen monitoren
+
+### 9.2 Updates
+
+- Regelmäßige Dataset-Updates
+- Code-Optimierungen
+- Performance-Monitoring
+
+#### Memory-Verhalten während der Verarbeitung
+
+Die Datenverarbeitung zeigt ein charakteristisches Speicher- und CPU-Nutzungsmuster:
+
+1. **Initiale Ladephase** (~85-90% RAM-Auslastung)
+   - Schnelle Verarbeitung (>3000 examples/s)
+   - Aufbau der Dataset-Strukturen im Speicher
+   - Arrow-Format-Konvertierung
+   - CPU-Kerne bei 100% Auslastung
+
+2. **Speicherdruck-Phase**
+   - Temporärer Einbruch der Performance (~80-90 examples/s)
+   - RAM-Nutzung nähert sich dem Maximum
+   - Ungleichmäßige CPU-Auslastung (20-80% pro Kern)
+   - Python Garbage Collector wird aktiv
+   - Automatische Speicherbereinigung
+   - I/O-Wartezeiten durch verstärktes Swapping
+
+3. **Stabilisierungsphase**
+   - RAM-Nutzung pendelt sich ein (~70% Auslastung)
+   - Performance erholt sich
+   - CPU-Kerne kehren zu 100% Auslastung zurück
+   - Effizientere Speichernutzung durch Cache-Strategien
+
+4. **Steady State**
+   - Periodische Performance-Schwankungen
+   - "Pendelbewegungen" in der Verarbeitungsgeschwindigkeit
+   - CPU-Auslastung wechselt zwischen:
+     * Volle Auslastung (100% alle Kerne) während aktiver Verarbeitung
+     * Reduzierte, ungleichmäßige Auslastung (20-80%) während Memory-Management-Phasen
+   - Ausbalancierte Nutzung von RAM und Cache
+   - Typische Performance: ~85-90 examples/s mit gelegentlichen Spitzen
+
+Diese Phasen sind normal und zeigen das Zusammenspiel von CPU- und Memory-Management:
+- Die ungleichmäßige CPU-Auslastung während der Speicherdruck-Phase deutet auf I/O-Wartezeiten hin
+- Volle CPU-Auslastung bei niedrigerer RAM-Nutzung zeigt optimale Verarbeitungsbedingungen
+- Periodische Garbage Collection und Cache-Rotation führen zu den beobachteten Schwankungen
+- Das System findet automatisch eine Balance zwischen Verarbeitungsgeschwindigkeit und Ressourcennutzung

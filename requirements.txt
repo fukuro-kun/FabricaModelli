@@ -1,10 +1,23 @@
-torch>=2.5.1
-transformers>=4.46.3
-datasets>=2.18.0
-librosa>=0.10.1
-tensorboard>=2.15.2
-numpy>=1.26.4
-tqdm>=4.66.2
-wandb>=0.16.3
-ctranslate2>=4.1.0
+# Core dependencies for model training
+torch==2.5.1
+transformers==4.46.3
+datasets==3.1.0
+evaluate>=0.4.0
+accelerate==1.1.1
+tokenizers==0.20.3  # Required for transformers compatibility
+numpy>=1.24.0
+tqdm>=4.65.0
+huggingface-hub>=0.16.0
+safetensors>=0.3.1
+tensorboard==2.18.0
+
+# Audio processing
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# Logging and utilities
+wandb>=0.15.0  # Optional for experiment tracking
 python-dotenv==1.0.0
+
+# Model conversion and optimization
+ctranslate2>=4.1.0

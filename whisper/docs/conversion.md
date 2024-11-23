@@ -6,10 +6,16 @@ Dieser Guide führt Sie durch den zweistufigen Konvertierungsprozess: zunächst 
 
 ## 1. Vorbereitung der Konvertierung
 
-### 1.1 Benötigte zusätzliche Pakete
+### 1.1 Benötigte Pakete
 
+Die notwendigen Pakete sind bereits in der zentralen `requirements.txt` enthalten:
+- ctranslate2
+- faster-whisper
+- evaluate
+
+Falls Sie die Hauptinstallation noch nicht durchgeführt haben:
 ```bash
-pip install ctranslate2 faster-whisper evaluate
+pip install -r requirements.txt
 ```
 
 ### 1.2 Verzeichnisstruktur
