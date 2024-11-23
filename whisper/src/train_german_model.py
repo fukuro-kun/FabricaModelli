@@ -15,7 +15,6 @@ Verzeichnisstruktur:
 ------------------
 Alle Pfade werden über Umgebungsvariablen in ../../.env konfiguriert:
 - BASE_DIR: Projekt-Hauptverzeichnis (in .env definieren)
-- DATA_DIR: ${BASE_DIR}/training/data
 - MODEL_DIR: ${BASE_DIR}/training/models
 - LOG_DIR: ${BASE_DIR}/training/logs
 - CONFIG_DIR: ${BASE_DIR}/whisper/config
