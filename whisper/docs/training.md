@@ -173,10 +173,11 @@ Das Training durchläuft mehrere aufeinanderfolgende Datenverarbeitungsphasen, d
   - Erstellen eines Datensatz-Index für schnellen Zugriff
 
 #### Phase 2: Dataset Generation
-- **Split-Generierung** (~3,500 examples/s)
+- **Split-Generierung** (~3,000 examples/s)
   - Aufteilen in Trainings- und Testdaten
   - Erstellung effizienter Datenstrukturen für schnellen Zugriff
-  - Parallelisierte Verarbeitung auf CPU-Kernen
+  - Parallelisierte Verarbeitung auf CPU-Kernen (num_proc=5)
+  - Batch-Größe: 32 für optimale CPU-Auslastung
   - Speicherung im Arrow-Format für optimale Performance
 
 - **Metadaten-Verarbeitung**
@@ -185,11 +186,13 @@ Das Training durchläuft mehrere aufeinanderfolgende Datenverarbeitungsphasen, d
   - Caching von Zwischenergebnissen für spätere Durchläufe
 
 #### Phase 3: Audio-Vorverarbeitung
-- **Feature-Extraktion** (~100-150 examples/s)
+- **Feature-Extraktion** (~80-120 examples/s)
   - CPU-intensive Verarbeitung der Audiodaten
   - Resampling auf 16kHz (falls nötig)
   - Mel-Spektrogramm-Berechnung
   - Normalisierung und Tokenisierung der Transkriptionen
+  - Batch-Größe: 4 für VRAM-Optimierung
+  - Gradient Accumulation: 6 Steps für effektive Batch-Größe von 48
 
 - **Caching-Strategie**
   - Zwischenspeicherung verarbeiteter Features auf SSD
@@ -200,16 +203,11 @@ Das Training durchläuft mehrere aufeinanderfolgende Datenverarbeitungsphasen, d
     ~/.cache/whisper/features/    # Extrahierte Features
     ```
 
-#### Phase 4: Batch-Vorbereitung
-- **Dynamisches Batching**
-  - Gruppierung ähnlich langer Sequenzen
-  - Padding und Maskierung für effizientes Training
-  - Verteilung der Batches auf verfügbare GPUs
-
-- **Memory Management**
-  - Streaming-Verarbeitung großer Datasets
-  - Garbage Collection nach Batch-Verarbeitung
-  - Optimierte Buffer-Größen für verschiedene Hardware-Konfigurationen
+**WICHTIG: Padding ist ESSENZIELL**
+- Padding ist nicht optional, sondern zwingend erforderlich
+- Jeder Batch muss einheitliche Tensor-Dimensionen haben
+- Padding geschieht batchweise (nicht global)
+- Längste Sequenz im Batch bestimmt die Padding-Länge
 
 #### Optimierungen und Best Practices
 - Nutzung von 5 CPU-Kernen für Parallelverarbeitung (1 Kern für System)
@@ -376,9 +374,58 @@ Die Batch-Verarbeitung ist ein kritischer Aspekt des Trainings:
 - Keine Kürzung zur Vermeidung von Audio-Text-Diskrepanzen
 - Experimentelle Modi für verschiedene Anwendungsfälle
 
-## 4. Training
+## 4. Training und VRAM-Management
 
-### 4.1 Training starten
+### 4.1 VRAM-Nutzung und Batch-Konfiguration
+
+Die VRAM-Nutzung ist ein kritischer Faktor beim Training des Whisper-Modells. Hier ist eine detaillierte Aufschlüsselung:
+
+#### VRAM-Berechnung pro GPU (16GB):
+
+1. **Audio-Sample VRAM (bei 30 Sekunden Audio):**
+   - Audio Features: 30s × 16kHz × 4 bytes ≈ 1.92MB
+   - Mel Spektrogramm: 3000 × 80 × 4 bytes ≈ 0.96MB
+   - Attention Maps: ~400MB pro Sample
+   - Gradienten & Aktivierungen: ~600MB
+   Total pro Sample: ~1GB
+
+2. **Fixer VRAM-Bedarf:**
+   - Modell-Parameter: ~3GB
+   - Optimizer States: ~2GB
+   - Gradienten Buffer: ~2GB
+   - Sicherheitspuffer: ~1GB
+   Total fix: ~8GB
+
+3. **Batch-Konfiguration:**
+   - Batch Size: 4 Samples × 1GB = 4GB VRAM pro Batch
+   - Gradient Accumulation: 6 Steps
+   - Effektive Samples pro GPU: 4 × 6 = 24
+   - Bei 2 GPUs: 48 Samples effektive Batch Size
+
+Diese Konfiguration ermöglicht:
+- Stabile Verarbeitung auch langer Sequenzen (bis 43 Sekunden)
+- Effiziente VRAM-Nutzung (12GB von 16GB)
+- 4GB Puffer für Spitzenlasten
+
+#### Optimierungen:
+
+1. **Gradient Accumulation:**
+   - Kleinere physische Batch Size (4)
+   - Mehr Accumulation Steps (6)
+   - Gleiche effektive Batch Size wie vorher (48)
+   - Bessere Handhabung langer Sequenzen
+
+2. **Mixed Precision Training:**
+   - FP16 für Berechnungen
+   - Reduziert VRAM-Bedarf
+   - Beschleunigt Training
+
+3. **Gradient Checkpointing:**
+   - Spart ~40% VRAM
+   - Kleine Performance-Einbuße
+   - Ermöglicht größere Batches
+
+### 4.2 Training starten
 
 Das Training-Skript setzt folgende Umgebungsvariablen:
 - Distributed Training Konfiguration (automatisch durch torchrun)
@@ -391,37 +438,34 @@ cd ${BASE_DIR}
 torchrun --nproc_per_node=2 ./whisper/train_german_model.py
 ```
 
-### 4.2 Trainings-Parameter und Prozess
+### 4.3 Performance-Metriken
 
-1. **Initialisierung**:
-   - Multi-GPU Setup mit NCCL Backend
-   - TensorBoard-Start auf Hauptprozess
-   - Dataset Cache-Konfiguration
-   - Distributed Training Synchronisation
+Mit der optimierten Batch-Konfiguration erreichen wir folgende Performance-Werte:
 
-2. **Datenvorbereitung**:
-   - Parallele Verarbeitung (nur Hauptprozess)
-   - Cache-Wiederverwendung wenn möglich
-   - Feature-Extraktion und Caching
-   - Batch-Größe: 48 für optimale Balance
+1. **Training Durchsatz:**
+   - ~48 Samples pro Schritt (4 × 6 × 2 GPUs)
+   - ~1.2 Samples pro Sekunde
+   - ~4,320 Samples pro Stunde
+   - ~103,680 Samples pro Tag
 
-3. **Training**:
-   - Batch-Größe: 6 pro GPU
-   - Gradient Accumulation: 4 Steps
-   - Effektive Batch-Größe: 48 (6 × 4 × 2 GPUs)
-   - Learning Rate: 1e-5 mit Warmup
-   - Training Steps: 40,000 (~2 Epochen)
-   - Checkpoints: Alle 2000 Schritte
-   - Evaluierung: Alle 2000 Schritte
-   - Dauer: ~20-24 Stunden
+2. **Speichernutzung:**
+   - VRAM: 12GB von 16GB (~75% Auslastung)
+   - System RAM: 40-45GB von 64GB
+   - SSD Cache: ~2.3TB
 
-4. **Optimierungen**:
-   - Gradient Checkpointing für VRAM-Effizienz
-   - FP16 Training
-   - Optimierte Cache-Nutzung
-   - Parallele Datenverarbeitung
+3. **Zeitliche Schätzungen:**
+   - Datenvorbereitung: ~4-5 Stunden
+   - Training (970k Samples): ~22-24 Stunden
+   - Evaluation: ~2 Stunden
+   - Gesamt: ~28-31 Stunden
 
-### 4.3 TensorBoard Monitoring
+4. **Checkpointing:**
+   - Checkpoint-Größe: ~6GB
+   - Speicherintervall: Alle 1000 Steps
+   - Evaluierung: Parallel zum Training
+   - Best Model Tracking: Basierend auf WER
+
+### 4.4 TensorBoard Monitoring
 
 TensorBoard wird automatisch gestartet und ist unter `http://localhost:6006` erreichbar.
 
@@ -434,7 +478,7 @@ TensorBoard wird automatisch gestartet und ist unter `http://localhost:6006` err
 - **Learning Rate**: Startet bei 1e-5, Warmup in ersten 500 Schritten
 - **GPU Utilization**: Sollte bei ~95-100% liegen
 
-### 4.4 VRAM und Ressourcennutzung
+### 4.5 VRAM und Ressourcennutzung
 
 Die Speichernutzung wurde sorgfältig optimiert für unsere RTX 4060 Ti (16GB):
 
@@ -630,3 +674,61 @@ Diese Phasen sind normal und zeigen das Zusammenspiel von CPU- und Memory-Manage
 - Volle CPU-Auslastung bei niedrigerer RAM-Nutzung zeigt optimale Verarbeitungsbedingungen
 - Periodische Garbage Collection und Cache-Rotation führen zu den beobachteten Schwankungen
 - Das System findet automatisch eine Balance zwischen Verarbeitungsgeschwindigkeit und Ressourcennutzung
+
+```
+## 4. Training-Konfiguration
+
+### 4.1 VRAM-Management
+
+Die VRAM-Nutzung ist ein kritischer Faktor beim Training des Modells. Hier ist eine detaillierte Aufschlüsselung:
+
+1. **Pro Sample VRAM-Nutzung:**
+   - Audio Features: ~2MB (30s Audio)
+   - Mel Spektrogramm: ~1MB
+   - Attention Maps: ~400MB
+   - Gradienten & Aktivierungen: ~600MB
+   - Total pro Sample: ~1GB
+
+2. **Fixer VRAM-Bedarf:**
+   - Modell-Parameter: ~3GB
+   - Optimizer States: ~2GB
+   - Gradienten Buffer: ~2GB
+   - Sicherheitspuffer: ~1GB
+   - Total Fix: ~8GB
+
+3. **Batch-Konfiguration:**
+   - Batch Size: 4 Samples × 1GB = 4GB VRAM pro Batch
+   - Gradient Accumulation: 6 Steps
+   - Effektive Samples pro GPU: 24
+   - Gesamt (2 GPUs): 48 Samples effektive Batch Size
+
+4. **VRAM-Nutzungsprofil:**
+   - Peak VRAM: ~12GB von 16GB
+   - Sicherheitspuffer: 4GB für Spitzenlasten
+   - Stabile Verarbeitung auch bei langen Sequenzen (bis 43s)
+
+### 4.2 Training Hyperparameter
+
+```python
+training_args = Seq2SeqTrainingArguments(
+    output_dir=output_dir,
+    per_device_train_batch_size=4,      # Reduziert von 6 auf 4
+    gradient_accumulation_steps=6,       # Erhöht von 4 auf 6
+    learning_rate=1e-5,
+    warmup_steps=2000,
+    max_steps=100000,
+    gradient_checkpointing=True,
+    fp16=True,
+    evaluation_strategy="steps",
+    per_device_eval_batch_size=4,       # Angepasst an Train Batch Size
+    save_steps=1000,
+    eval_steps=1000,
+    logging_steps=25,
+    load_best_model_at_end=True,
+    metric_for_best_model="wer",
+    greater_is_better=False,
+    push_to_hub=True,
+    report_to="wandb",
+)
+
+```

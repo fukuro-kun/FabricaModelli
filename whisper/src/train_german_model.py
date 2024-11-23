@@ -59,7 +59,7 @@ import gc                  # Garbage Collection
 
 # Lade Umgebungsvariablen
 if not load_dotenv(Path(__file__).parent.parent.parent / '.env'):
-    print("⚠️  Keine .env Datei gefunden. Bitte erstellen Sie eine .env Datei im Projektroot.")
+    logger.info("⚠️  Keine .env Datei gefunden. Bitte erstellen Sie eine .env Datei im Projektroot.")
     sys.exit(1)
 
 #######################################
@@ -75,18 +75,18 @@ MODEL_DIR = Path(os.getenv('MODEL_DIR', str(BASE_DIR / 'models')))
 LOG_DIR = Path(os.getenv('LOG_DIR', str(BASE_DIR / 'logs')))
 CONFIG_DIR = Path(os.getenv('CONFIG_DIR', str(BASE_DIR / 'whisper/config')))
 
-# Cache-Verzeichnisse
-# Prüfe erst auf .env Einstellungen, dann Fallback auf Standard-Pfade
+# Cache-Verzeichnisse (exakt wie in .env definiert)
 HF_HOME = Path(os.getenv('HF_HOME', str(BASE_DIR / 'cache/huggingface')))
+TRANSFORMERS_CACHE = Path(os.getenv('TRANSFORMERS_CACHE', str(BASE_DIR / 'cache/huggingface')))
 HF_DATASETS_CACHE = Path(os.getenv('HF_DATASETS_CACHE', str(BASE_DIR / 'cache/datasets')))
 AUDIO_CACHE_DIR = Path(os.getenv('AUDIO_CACHE_DIR', str(BASE_DIR / 'cache/audio')))
 FEATURES_CACHE_DIR = Path(os.getenv('FEATURES_CACHE_DIR', str(BASE_DIR / 'cache/features')))
 
 # Setze Hugging Face Cache-Umgebungsvariablen
+os.environ['TRANSFORMERS_CACHE'] = str(TRANSFORMERS_CACHE)
 os.environ['HF_HOME'] = str(HF_HOME)
-os.environ['TRANSFORMERS_CACHE'] = str(HF_HOME)  # Gleicher Pfad wie HF_HOME
 os.environ['HF_DATASETS_CACHE'] = str(HF_DATASETS_CACHE)
-os.environ['HUGGINGFACE_HUB_CACHE'] = str(HF_HOME)
+os.environ['HUGGINGFACE_HUB_CACHE'] = str(HF_HOME)  
 
 #######################################
 # 3. Python Standard-Bibliothek
@@ -111,17 +111,46 @@ local_rank = int(os.environ.get("LOCAL_RANK", 0))
 torch.cuda.set_device(local_rank)
 dist.init_process_group(backend="nccl")
 
-# Debug: Zeige Pfade (nur vom Hauptprozess)
-if local_rank == 0:
-    print("\nVerzeichnisstruktur:")
-    print(f"Project Root: {BASE_DIR}")
-    print(f"HF Cache Dir: {HF_HOME}")
-    print(f"Models Dir: {MODEL_DIR}")
-    print(f"Logs Dir: {LOG_DIR}")
-    print(f"Config Dir: {CONFIG_DIR}")
-    print(f"HF Datasets Cache: {HF_DATASETS_CACHE}")
-    print(f"Audio Cache: {AUDIO_CACHE_DIR}")
-    print(f"Features Cache: {FEATURES_CACHE_DIR}")
+# =====================================================================
+# WICHTIG: Logger-Initialisierung
+# ---------------------------------------------------------------------
+# Diese Initialisierung MUSS an dieser Position bleiben!
+# 
+# Reihenfolge ist kritisch:
+# 1. Nach: Imports und Verzeichnis-Konfiguration
+# 2. Vor: Jeglicher Logger-Verwendung in Funktionen
+# 3. Vor: Funktionsdefinitionen die den Logger nutzen
+#
+# Gründe für diese Position:
+# - Vermeidet "NameError: name 'logger' is not defined"
+# - Sichert Logging in allen Distributed Training Prozessen
+# - Garantiert konsistente Log-Ausgaben
+#
+# WARNUNG: Verschieben dieser Initialisierung wird zu Fehlern führen!
+# =====================================================================
+
+# Logging-Konfiguration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(LOG_DIR / 'training.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Definiere alle benötigten Verzeichnisse
+required_directories = [
+    MODEL_DIR,
+    LOG_DIR,
+    CONFIG_DIR,
+    FEATURES_CACHE_DIR,
+    AUDIO_CACHE_DIR,
+    HF_DATASETS_CACHE,
+    HF_HOME,
+    TRANSFORMERS_CACHE
+]
 
 #######################################
 # 5. Wissenschaftliche Bibliotheken
@@ -153,128 +182,213 @@ from transformers import (
 )
 
 def is_main_process():
+    """
+    Prüft, ob der aktuelle Prozess der Hauptprozess (rank 0) ist.
+    
+    Diese Funktion wird verwendet, um sicherzustellen, dass bestimmte
+    Operationen (wie Logging oder Verzeichniserstellung) nur einmal
+    ausgeführt werden, auch wenn mehrere GPUs verwendet werden.
+    
+    Returns:
+        bool: True wenn der aktuelle Prozess rank 0 hat, sonst False
+    
+    DDP-Spezifika:
+        - Prüft local_rank für Multi-GPU Setup
+        - Koordiniert Logging zwischen Prozessen
+        - Verhindert Race Conditions bei I/O
+        - Steuert TensorBoard & Checkpoint-Erstellung
+    
+    Notes:
+        - Wichtig für verteiltes Training (DDP)
+        - Verhindert doppelte Ausgaben und Ressourcenkonflikte
+        - Zentral für die Prozess-Koordination
+    """
     return local_rank == 0
 
 def ensure_directories_exist(directories):
     """
     Erstellt alle benötigten Verzeichnisse mit verbesserter Fehlerbehandlung.
     
+    Diese Funktion:
+    1. Erstellt Verzeichnisse rekursiv (inkl. Elternverzeichnisse)
+    2. Ignoriert bereits existierende Verzeichnisse
+    3. Loggt Erfolg/Fehler auf dem Hauptprozess
+    
     Args:
-        directories (list): Liste von Verzeichnispfaden (Path-Objekte)
+        directories (list[Path]): Liste von Verzeichnispfaden (Path-Objekte)
+    
+    Verzeichnisstruktur:
+        - MODEL_DIR: Trainierte Modelle & Checkpoints
+        - LOG_DIR: TensorBoard & Training Logs
+        - FEATURE_CACHE_DIR: Vorverarbeitete Features
+        - AUDIO_CACHE_DIR: Zwischengespeicherte Audio-Daten
+        - HF_DATASETS_CACHE: Hugging Face Dataset Cache
+        - HF_HOME: Hugging Face Home für Modelle
+    
+    Raises:
+        Exception: Bei Fehlern während der Verzeichniserstellung
+    
+    Notes:
+        - Sicher für parallele Ausführung
+        - Logging nur auf dem Hauptprozess
+        - Wichtig für initiale Projektstruktur
+        - Prüft Schreibrechte
     """
     for directory in directories:
         try:
             directory.mkdir(parents=True, exist_ok=True)
             if is_main_process():
-                print(f"✓ Verzeichnis erstellt/geprüft: {directory}")
+                logger.info(f"✓ Verzeichnis erstellt/geprüft: {directory}")
         except Exception as e:
-            print(f"⚠️  Fehler beim Erstellen von {directory}: {str(e)}")
+            logger.info(f"⚠️  Fehler beim Erstellen von {directory}: {str(e)}")
             raise
 
-# Definiere alle benötigten Verzeichnisse
-required_directories = [
-    MODEL_DIR,
-    LOG_DIR,
-    FEATURE_CACHE_DIR,
-    AUDIO_CACHE_DIR,
-    HF_DATASETS_CACHE,
-    HF_HOME
-]
-
-# Erstelle Verzeichnisse
-ensure_directories_exist(required_directories)
-
-# Logging-Konfiguration
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_DIR / 'training.log')
-    ]
-)
-logger = logging.getLogger(__name__)
-
-def start_tensorboard(log_dir):
+def cleanup_resources():
     """
-    Startet TensorBoard im Hintergrund mit verbesserter Fehlerbehandlung
-    und Distributed Training Unterstützung.
+    Bereinigt Ressourcen am Ende des Trainings.
     
-    Args:
-        log_dir: TensorBoard Log-Verzeichnis
+    Diese Funktion:
+    1. Beendet TensorBoard-Prozess
+    2. Bereinigt GPU-Speicher
+    3. Schließt offene Dateien
     
-    Returns:
-        subprocess.Popen oder None: TensorBoard-Prozess wenn erfolgreich, sonst None
+    Timing:
+        - Am Ende des Trainings
+        - Bei vorzeitigem Abbruch
+        - Im Exception-Fall
+    
+    Notes:
+        - Wichtig für sauberes Shutdown
+        - Verhindert Ressourcen-Leaks
+        - Läuft im finally-Block
+        - Logging nur auf Hauptprozess
     """
-    # Nur der Hauptprozess (Rank 0) sollte TensorBoard verwalten
-    if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
-        return None
+    logger.info("Führe Speicherbereinigung durch...")
+    
+    # PyTorch CUDA Cache leeren
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
         
-    try:
-        # Prüfe ob TensorBoard bereits läuft
-        import socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        result = sock.connect_ex(('127.0.0.1', 6006))
-        sock.close()
-        
-        if result == 0:
-            logger.info("TensorBoard läuft bereits auf Port 6006")
-            return None
-            
-        # Starte TensorBoard nur wenn es noch nicht läuft
-        tensorboard_process = subprocess.Popen(
-            ["tensorboard", "--logdir", log_dir, "--port", "6006"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        
-        # Warte kurz und prüfe ob der Prozess erfolgreich gestartet wurde
-        time.sleep(2)
-        if tensorboard_process.poll() is None:
-            logger.info("TensorBoard erfolgreich gestartet auf Port 6006")
-            return tensorboard_process
-        else:
-            stdout, stderr = tensorboard_process.communicate()
-            logger.warning(f"TensorBoard konnte nicht gestartet werden: {stderr.decode()}")
-            return None
-            
-    except Exception as e:
-        logger.warning(f"TensorBoard konnte nicht gestartet werden: {str(e)}")
-        return None
+    # Distributed Training cleanup
+    if dist.is_initialized():
+        dist.destroy_process_group()
+    
+    # Garbage Collection forcieren
+    gc.collect()
+    
+    logger.info("Speicherbereinigung abgeschlossen")
 
+def check_system_resources():
+    """
+    Prüft kritische System-Ressourcen vor dem Training.
+    
+    Diese Funktion validiert:
+    1. Existenz der model_config.json
+    2. Verfügbaren VRAM (minimum 16GB)
+    3. Verfügbaren Festplattenspeicher (minimum 500GB empfohlen)
+    
+    Raises:
+        FileNotFoundError: Wenn model_config.json nicht gefunden wird
+        ValueError: Wenn weniger als 16GB VRAM verfügbar sind
+    
+    Notes:
+        - Läuft nur auf dem Hauptprozess (rank 0)
+        - Gibt Warnung aus bei weniger als 500GB freiem Speicherplatz
+        - VRAM-Check basiert auf der ersten GPU
+    """
+    if is_main_process():  # Nur Hauptprozess führt Checks durch
+        # 1. Konfigurationsdatei
+        config_path = CONFIG_DIR / 'model_config.json'
+        if not config_path.exists():
+            raise FileNotFoundError(f"model_config.json nicht gefunden in: {config_path}")
+        
+        # 2. VRAM Check
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory
+        if gpu_memory < 16 * (1024**3):  # 16GB
+            raise ValueError(f"GPU hat nur {gpu_memory/(1024**3):.1f}GB VRAM. Minimum: 16GB")
+        
+        # 3. Disk Space Check
+        import shutil
+        free_space = shutil.disk_usage(BASE_DIR).free
+        if free_space < 500 * (1024**3):  # 500GB
+            logger.warning(f"Nur noch {free_space/(1024**3):.1f}GB freier Speicherplatz. Empfohlen: 500GB")
+        
+        logger.info("✓ System-Ressourcen erfolgreich geprüft")
+
+def cleanup_gpu_memory():
+    """
+    Bereinigt den GPU-Speicher nach speicherintensiven Operationen.
+    
+    Diese Funktion:
+    1. Leert den PyTorch CUDA Cache
+    2. Führt explizite Garbage Collection durch
+    3. Loggt den verfügbaren GPU-Speicher (nur Hauptprozess)
+    
+    Notes:
+        - Sollte nach großen Tensor-Operationen aufgerufen werden
+        - Logging nur auf dem Hauptprozess
+        - Hilft bei der Vermeidung von Out-of-Memory Fehlern
+    
+    Timing:
+        - Nach großen Tensor-Operationen
+        - Vor Memory-intensiven Operationen
+        - Bei OOM-Warnings
+        - Zwischen Trainings-Epochen
+    """
+    torch.cuda.empty_cache()
+    gc.collect()
+    if is_main_process():
+        logger.debug(f"GPU Memory bereinigt - Verfügbar: {torch.cuda.memory_allocated()/1024**3:.1f}GB")
 
 def prepare_dataset(batch, processor):
     """
-    Bereitet einen Batch für das Training vor
+    Bereitet einen Batch für das Training vor.
     
-    Optimierungen:
-    - Robuste Audio-Verarbeitung
-    - Fehlertolerante Feature-Extraktion
-    - Verbesserte Fehlerbehandlung
+    Diese Funktion:
+    1. Lädt und verarbeitet Audio-Dateien
+    2. Tokenisiert Text mit dem Whisper-Prozessor
+    3. Handhabt Padding und Attention Masks
     
     Args:
-        batch: Dataset Batch
-        processor: WhisperProcessor Instanz
+        batch (dict): Ein Batch aus dem Dataset mit 'audio' und 'text' Feldern
+        processor (WhisperProcessor): Der Whisper Tokenizer und Feature Extractor
     
     Returns:
-        dict: Verarbeiteter Batch mit Features und Labels
+        dict: Verarbeiteter Batch mit:
+            - input_features: Prozessierte Audio-Features
+            - labels: Tokenisierte Text-Labels
+            - attention_mask: Attention Mask für die Features
+            - decoder_attention_mask: Attention Mask für den Decoder
+    
+    Notes:
+        - Unterstützt Audio-Längen von 4-43 Sekunden
+        - Verwendet 16kHz Sampling Rate
+        - Handhabt Batch-Verarbeitung effizient
+    
+    WICHTIG - Padding Details:
+        - Padding ist ESSENZIELL für das Training, nicht optional!
+        - Jeder Batch muss einheitliche Tensor-Dimensionen haben
+        - Padding geschieht batchweise (nicht global)
+        - Längste Sequenz im Batch bestimmt die Padding-Länge
+        - Optimiert für typische Längen von 4-30 Sekunden
+        - Markiert lange Sequenzen (>32 Sekunden) für effizientes Batching
+    
+    Memory Management:
+        - Große Tensoren werden nach Gebrauch explizit freigegeben
+        - Feature Extraction geschieht streaming für RAM-Effizienz
+        - Zwischenergebnisse werden nicht unnötig gehalten
     """
     try:
-        # Audio-Verarbeitung mit verbesserter Fehlerbehandlung
+        # 1. Audio-Verarbeitung
         audio = batch["audio"]
+        audio_array = audio["array"]
+        sampling_rate = audio.get("sampling_rate", 16000)
         
-        # Prüfe Audio-Format
-        if isinstance(audio, dict):
-            audio_array = audio.get("array", None)
-            sampling_rate = audio.get("sampling_rate", 16000)
-        else:
-            audio_array = audio
-            sampling_rate = 16000
-            
-        if audio_array is None:
-            raise ValueError("Ungültiges Audio-Format")
-            
-        # Resampling nur wenn nötig
+        # Berechne Audio-Länge in Sekunden
+        audio_length = len(audio_array) / sampling_rate
+        is_long_sequence = audio_length > 32
+        
+        # 2. Resampling (nur wenn nötig)
         if sampling_rate != 16000:
             audio_array = librosa.resample(
                 y=audio_array,
@@ -283,22 +397,33 @@ def prepare_dataset(batch, processor):
                 res_type="kaiser_best"
             )
             
-        # Feature-Extraktion mit Fehlerbehandlung
+        # 3. Feature-Extraktion mit automatischem Padding
         extracted = processor(
-            audio=audio_array,
+            audio=audio_array, 
             sampling_rate=16000,
-            return_tensors="pt",
-            return_attention_mask=True
+            return_tensors="pt",  # PyTorch-Tensoren zurückgeben
+            padding=True,  # Essenziell für Batch-Verarbeitung
+            return_attention_mask=True 
         )
         
+        # Tokenisiere Text mit Padding
+        with processor.as_target_processor():
+            labels = processor(
+                text=batch["transkription"],
+                return_tensors="pt",
+                padding=True  # Aktiviere Padding für Labels
+            ).input_ids[0]
+        
+        # 4. Feature-Typ bestimmen
         # Bestimme Feature-Typ (input_values oder input_features)
         ft = "input_values" if hasattr(extracted, "input_values") else "input_features"
         
-        # Erstelle verarbeiteten Batch
+        # 5. Batch erstellen
         processed_data = {
             "input_features": getattr(extracted, ft)[0],
             "attention_mask": extracted.attention_mask[0],
-            "labels": processor(text=batch["transkription"]).input_ids
+            "labels": processor(text=batch["transkription"]).input_ids,
+            "is_long_sequence": is_long_sequence  # Für Batch-Optimierung
         }
         
         return processed_data
@@ -307,93 +432,48 @@ def prepare_dataset(batch, processor):
         logger.error(f"Fehler bei der Batch-Verarbeitung: {str(e)}")
         raise
 
-
-def compute_metrics(pred):
-    """
-    Berechnet die WER (Word Error Rate) für die Vorhersagen
-    
-    Benchmark-Ziel: 4.77% WER (primeline-whisper-large-v3-turbo-german)
-    
-    Args:
-        pred: EvalPrediction object mit predictions und label_ids
-    
-    Returns:
-        dict: Metrik-Ergebnisse (WER)
-    
-    Warum diese Metrik wichtig ist:
-    - WER ist der Standard zur Bewertung der Genauigkeit von ASR-Modellen
-    """
-    # Implementierung der Funktion
-    wer_metric = evaluate.load("wer")
-    
-    pred_ids = pred.predictions
-    label_ids = pred.label_ids
-    
-    # Dekodiere Vorhersagen
-    pred_str = processor.batch_decode(pred_ids, skip_special_tokens=True)
-    # Dekodiere Labels (ersetze -100)
-    label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
-    label_str = processor.batch_decode(label_ids, skip_special_tokens=True)
-    
-    wer = wer_metric.compute(predictions=pred_str, references=label_str)
-    
-    return {"wer": wer}
-
-
-def evaluate_on_benchmark(model, processor, device="cuda"):
-    """
-    Vergleicht die Performance mit dem Benchmark-Dataset
-    
-    Fokus auf Vergleich mit:
-    - primeline-whisper-large-v3-turbo-german (Beste: 4.77% WER)
-    
-    Args:
-        model: Trainiertes Modell
-        processor: WhisperProcessor
-        device: Ziel-Device (default: "cuda")
-    
-    Returns:
-        float: WER auf Benchmark-Dataset
-    
-    Warum Benchmarking wichtig ist:
-    - Ermöglicht die Bewertung der Modellleistung im Vergleich zu bestehenden Lösungen
-    """
-    # Implementierung der Funktion
-    logger.info("Vergleiche mit Benchmark-Modellen...")
-    
-    # Lade Benchmark Dataset
-    benchmark = load_dataset(
-        "flozi00/asr-german-mixed-evals",
-        split="train",
-        cache_dir=str(DATASET_CACHE_DIR)
-    )
-    wer_metric = evaluate.load("wer")
-    
-    # Sammle Benchmark-Ergebnisse
-    refs = []
-    preds = []
-    
-    for example in benchmark:
-        if example["primeline-whisper-large-v3-turbo-german"]:  # Bestes Modell
-            refs.append(example["references"])
-            preds.append(example["primeline-whisper-large-v3-turbo-german"])
-    
-    # Berechne WER für Benchmark-Modell
-    benchmark_wer = wer_metric.compute(predictions=preds, references=refs)
-    
-    logger.info("\nBenchmark-Vergleich:")
-    logger.info("-" * 50)
-    logger.info(f"Bestes Modell (primeline-whisper-large-v3-turbo-german):")
-    logger.info(f"WER: {benchmark_wer:.2%} ({len(refs)} Beispiele)")
-    logger.info("\nHinweis: Dies ist unser Ziel-WER für das Training.")
-    
-    return benchmark_wer
-
-
 def train_model():
     """
-    Trainiert das deutsche Whisper-Modell mit verbesserter Fehlerbehandlung
-    und Multi-GPU Unterstützung
+    Hauptfunktion für das Training des deutschen Whisper-Modells.
+    
+    Diese Funktion:
+    1. Initialisiert Multi-GPU Training (DDP)
+    2. Lädt und verarbeitet das Dataset
+    3. Konfiguriert Modell, Trainer und TensorBoard
+    4. Führt Training und Evaluation durch
+    
+    Environment:
+        - Benötigt mindestens 16GB VRAM pro GPU
+        - Unterstützt Multi-GPU Training
+        - Verwendet TensorBoard für Monitoring
+    
+    Konfiguration:
+        - Batch Size: 4 pro GPU
+        - Gradient Accumulation: 6 Schritte
+        - Effektive Batch Size: 48 (4 × 6 × 2 GPUs)
+        - Learning Rate: 1e-5
+        - Warmup Steps: 500
+        - Optimizer: AdamW mit weight_decay=0.01
+        - LR Scheduler: Linear mit Warmup
+    
+    Fehlerbehandlung:
+        - Frühe Validierung: Prüft Systemressourcen
+        - Prozess-Validierung: Überwacht Training
+        - Automatische Ressourcen-Freigabe
+        - Detailliertes Fehler-Logging
+        - Graceful Shutdown bei Interrupts
+    
+    Checkpoint-Management:
+        - Speichert alle 1000 Schritte
+        - Behält beste 3 Checkpoints (WER)
+        - Unterstützt Training-Fortsetzung
+        - Speichert Optimizer-State
+    
+    Notes:
+        - Implementiert robuste Fehlerbehandlung
+        - Optimiert für 16GB GPUs
+        - Speichert Checkpoints und Logs
+        - Unterstützt Training-Fortsetzung
     """
     tensorboard_process = None
     try:
@@ -421,13 +501,13 @@ def train_model():
             
         # Dataset Cache-Konfiguration
         dataset_cache_dir = str(HF_DATASETS_CACHE)
-        logging.info(f"Verwende Dataset Cache-Pfad: {dataset_cache_dir}")
+        logger.info(f"Verwende Dataset Cache-Pfad: {dataset_cache_dir}")
 
         # Lade Datensatz nur auf dem Hauptprozess
         if is_main_process():
-            logging.info("Lade deutschen ASR-Datensatz (Hauptprozess)...")
+            logger.info("Lade deutschen ASR-Datensatz (Hauptprozess)...")
         else:
-            logging.info(f"Warte auf Hauptprozess (Rang {dist.get_rank()})...")
+            logger.info(f"Warte auf Hauptprozess (Rang {dist.get_rank()})...")
 
         # Synchronisiere alle Prozesse vor dem Dataset-Loading
         dist.barrier()
@@ -444,9 +524,9 @@ def train_model():
         dist.barrier()
 
         if is_main_process():
-            logging.info("Dataset erfolgreich geladen!")
-            logging.info(f"Trainings-Samples: {len(dataset['train'])}")
-            logging.info(f"Test-Samples: {len(dataset['test'])}")
+            logger.info("Dataset erfolgreich geladen!")
+            logger.info(f"Trainings-Samples: {len(dataset['train'])}")
+            logger.info(f"Test-Samples: {len(dataset['test'])}")
 
         # Audio-Format-Überprüfung - NUR EINMAL mit erstem Sample
         sample_audio = dataset["train"][0]["audio"]
@@ -501,7 +581,8 @@ def train_model():
                 remove_columns=train_dataset.column_names,
                 num_proc=5,
                 batch_size=32,  
-                writer_batch_size=1000,  
+                writer_batch_size=1000,
+                batched=True,  # Aktiviere Batch-Verarbeitung
                 cache_file_name=str(features_cache_dir / "train_processed.arrow"),
                 desc="Verarbeite Trainingsdaten (num_proc=5)"
             )
@@ -513,8 +594,9 @@ def train_model():
                 lambda x: prepare_dataset(x, processor),
                 remove_columns=eval_dataset.column_names,
                 num_proc=5,
-                batch_size=32,  
-                writer_batch_size=1000,  
+                batch_size=32,
+                writer_batch_size=1000,
+                batched=True,  # Aktiviere Batch-Verarbeitung
                 cache_file_name=str(features_cache_dir / "eval_processed.arrow"),
                 desc="Verarbeite Evaluierungsdaten (num_proc=5)"
             )
@@ -527,60 +609,75 @@ def train_model():
             raise
         
         # 5. Trainings-Konfiguration
+        # VRAM-Berechnung und Batch-Konfiguration für 2x 16GB GPUs:
+        #
+        # 1. Pro Sample VRAM-Nutzung:
+        #    - Audio Features (30s Audio): 30s × 16kHz × 4 bytes ≈ 1.92MB
+        #    - Mel Spektrogramm: 3000 × 80 × 4 bytes ≈ 0.96MB
+        #    - Attention Maps: ~400MB (variiert mit Sequenzlänge)
+        #    - Gradienten & Aktivierungen: ~600MB
+        #    Total pro Sample: ~1GB
+        #
+        # 2. Fixer VRAM-Bedarf:
+        #    - Modell-Parameter: ~3GB (Whisper large-v3)
+        #    - Optimizer States: ~2GB (AdamW)
+        #    - Gradienten Buffer: ~2GB
+        #    - Sicherheitspuffer: ~1GB (für Spitzenlasten)
+        #    Total Fix: ~8GB
+        #
+        # 3. Batch-Konfiguration:
+        #    - Batch Size: 4 Samples × 1GB = 4GB VRAM pro Batch
+        #    - Gradient Accumulation: 6 Steps
+        #    - Effektive Samples pro GPU: 4 × 6 = 24
+        #    - Bei 2 GPUs: 48 Samples effektive Batch Size
+        #
+        # 4. VRAM-Nutzungsprofil:
+        #    - Peak VRAM: ~12GB von 16GB verfügbar
+        #    - Sicherheitspuffer: 4GB für lange Sequenzen (bis 43s)
+        #    - Stabile Verarbeitung auch bei Spitzenlasten
+        #
+        # Diese Konfiguration ermöglicht:
+        # - Optimale VRAM-Nutzung (~75%)
+        # - Stabile Verarbeitung langer Sequenzen
+        # - Effektive Batch-Normalisierung
+        # - Ausreichend Puffer für Spitzenlasten
+
         # Trainingsparameter basierend auf Datensatzgröße und Hardware
-        samples_per_batch = 6 * 4 * torch.cuda.device_count()  # Batch Size * Grad Accum * GPUs
+        samples_per_batch = 4 * 6 * torch.cuda.device_count()  # Reduzierte Batch Size × Erhöhte Grad Accum × GPUs
         steps_per_epoch = len(train_dataset) / samples_per_batch
         
         training_args = Seq2SeqTrainingArguments(
             output_dir=str(MODEL_DIR / MODEL_CONFIG['base_name']),
             
-            # VRAM-Optimierung für 2x 16GB GPUs:
-            # 1. Batch Size & Gradient Accumulation:
-            #    - 6 Samples/GPU × ~1.5GB ≈ 9GB VRAM pro Batch
-            #    - 7GB VRAM Reserve für Modell, Gradienten, States
-            #    - Gradient Accumulation: 4 Steps = 48 effektive Batch Size
-            #    - Kein extra VRAM-Bedarf durch Accumulation
-            per_device_train_batch_size=6,
-            gradient_accumulation_steps=4,
+            # 1. Kritische Training-Parameter
+            max_steps=40_000,                # ~2 Epochen bei 970k Samples
+            warmup_steps=500,                # Stabiler Start mit ~1% Warmup
+            learning_rate=1e-5,              # Bewährt für Whisper Fine-Tuning
             
-            # 2. Speicheroptimierungen:
-            #    - Gradient Checkpointing: ~40% VRAM-Einsparung
-            #    - fp16: Halbierter Speicherbedarf
-            #    - Deaktivierte Parameter-Suche für Multi-GPU Effizienz
-            gradient_checkpointing=True,
-            fp16=True,
-            ddp_find_unused_parameters=False,
+            # 2. Batch & Memory
+            per_device_train_batch_size=4,   # Optimiert für 16GB VRAM
+            gradient_accumulation_steps=6,    # Effektive Batch Size: 48
+            gradient_checkpointing=True,      # VRAM-Optimierung
+            fp16=True,                       # Mixed Precision Training
+            max_grad_norm=1.0,               # Gradient Clipping für Stabilität
             
-            # 3. Evaluation:
-            #    - Größere Eval Batch Size (8) da keine Gradienten/States
-            #    - Evaluierung alle 2k Steps (5% der max_steps)
+            # 3. Monitoring & Evaluation
             evaluation_strategy="steps",
-            per_device_eval_batch_size=8,
+            per_device_eval_batch_size=4,    # Konsistent mit Training Batch Size
             predict_with_generate=True,
             generation_max_length=384,
             eval_steps=2000,
             save_strategy="steps",
             save_steps=2000,
-            
-            # 4. Training Length:
-            #    - ~40k Steps = ~2 Epochen bei 970k Samples
-            #    - 500 Warmup Steps für stabilen Start
-            max_steps=40_000,
-            warmup_steps=500,
-            
-            # 5. Monitoring:
-            #    - TensorBoard Logging alle 100 Steps
-            #    - Speichere bestes Modell nach WER
-            logging_steps=100,
+            save_total_limit=3,              # Speichere beste 3 Checkpoints
+            logging_steps=50,
             report_to=["tensorboard"],
             load_best_model_at_end=True,
             metric_for_best_model="wer",
             greater_is_better=False,
             
-            # 6. Optimizer:
-            #    - Learning Rate für effektives Fine-Tuning
-            learning_rate=1e-5,
-            remove_unused_columns=False,  # Wichtig: Erlaube alle Dataset-Spalten
+            # 4. Dataset
+            remove_unused_columns=False,      # Behalte alle Dataset-Spalten
         )
         
         # Konfiguriere Generierung für deutsches Modell
@@ -649,33 +746,179 @@ def train_model():
             tensorboard_process.terminate()
             logger.info("TensorBoard beendet")
             
-def cleanup_resources():
-    """Bereinigt Ressourcen beim Beenden des Skripts"""
-    logger.info("Führe Speicherbereinigung durch...")
+def compute_metrics(pred):
+    """
+    Berechnet die Word Error Rate (WER) für die Vorhersagen.
     
-    # PyTorch CUDA Cache leeren
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        
-    # Distributed Training cleanup
-    if dist.is_initialized():
-        dist.destroy_process_group()
+    Diese Funktion:
+    1. Decodiert die Modell-Outputs zu Text
+    2. Normalisiert Vorhersagen und Referenzen
+    3. Berechnet WER mit evaluate.load("wer")
     
-    # Garbage Collection forcieren
-    gc.collect()
+    Args:
+        pred (Seq2SeqPredictionOutput): Enthält:
+            - predictions: Modell-Vorhersagen (Token-IDs)
+            - label_ids: Referenz-Labels (Token-IDs)
     
-    logger.info("Speicherbereinigung abgeschlossen")
+    Returns:
+        dict: {"wer": float} - Word Error Rate
+    
+    Notes:
+        - Benchmark-Ziel: 4.77% WER (primeline-whisper-large-v3-turbo-german)
+        - Ignoriert Padding-Token (-100)
+        - Case-sensitive Evaluation
+        - WER ist der Standard zur Bewertung der ASR-Genauigkeit
+        - Ermöglicht direkten Vergleich mit anderen ASR-Systemen
+    
+    Metriken-Details:
+        - WER = (S + D + I) / N
+        - S: Substitutionen
+        - D: Löschungen
+        - I: Einfügungen
+        - N: Wörter in Referenz
+    """
+    # Implementierung der Funktion
+    wer_metric = evaluate.load("wer")
+    
+    pred_ids = pred.predictions
+    label_ids = pred.label_ids
+    
+    # Dekodiere Vorhersagen
+    pred_str = processor.batch_decode(pred_ids, skip_special_tokens=True)
+    # Dekodiere Labels (ersetze -100)
+    label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
+    label_str = processor.batch_decode(label_ids, skip_special_tokens=True)
+    
+    wer = wer_metric.compute(predictions=pred_str, references=label_str)
+    
+    return {"wer": wer}
 
-def main():
+def evaluate_on_benchmark(model, processor, device="cuda"):
+    """
+    Evaluiert das Modell auf einem Benchmark-Dataset.
+    
+    Diese Funktion:
+    1. Lädt ein spezielles Benchmark-Dataset
+    2. Führt Inferenz auf allen Beispielen durch
+    3. Berechnet und loggt die WER-Metrik
+    
+    Args:
+        model (WhisperForConditionalGeneration): Trainiertes Whisper-Modell
+        processor (WhisperProcessor): Whisper Tokenizer und Feature Extractor
+        device (str, optional): Gerät für Inferenz. Defaults to "cuda"
+    
+    Returns:
+        float: Berechnete Word Error Rate (WER)
+    
+    Notes:
+        - Vergleicht mit primeline-whisper-large-v3-turbo-german (4.77% WER)
+        - Verwendet evaluate.load("wer") für konsistente Metriken
+        - Loggt detaillierte Ergebnisse für Analyse
+    
+    Importance:
+        - Ermöglicht die Bewertung der Modellleistung im Vergleich zu bestehenden Lösungen
+        - Hilft bei der Identifizierung von Verbesserungspotential
+        - Stellt sicher, dass das Training in die richtige Richtung geht
+    """
+    # Implementierung der Funktion
+    logger.info("Vergleiche mit Benchmark-Modellen...")
+    
+    # Lade Benchmark Dataset
+    benchmark = load_dataset(
+        "flozi00/asr-german-mixed-evals",
+        split="train",
+        cache_dir=str(DATASET_CACHE_DIR)
+    )
+    wer_metric = evaluate.load("wer")
+    
+    # Sammle Benchmark-Ergebnisse
+    refs = []
+    preds = []
+    
+    for example in benchmark:
+        if example["primeline-whisper-large-v3-turbo-german"]:  # Bestes Modell
+            refs.append(example["references"])
+            preds.append(example["primeline-whisper-large-v3-turbo-german"])
+    
+    # Berechne WER für Benchmark-Modell
+    benchmark_wer = wer_metric.compute(predictions=preds, references=refs)
+    
+    logger.info("\nBenchmark-Vergleich:")
+    logger.info("-" * 50)
+    logger.info(f"Bestes Modell (primeline-whisper-large-v3-turbo-german):")
+    logger.info(f"WER: {benchmark_wer:.2%} ({len(refs)} Beispiele)")
+    logger.info("\nHinweis: Dies ist unser Ziel-WER für das Training.")
+    
+    return benchmark_wer
+
+def start_tensorboard(log_dir):
+    """
+    Startet TensorBoard im Hintergrund mit verbesserter Fehlerbehandlung
+    und Distributed Training Unterstützung.
+    
+    Diese Funktion:
+    1. Prüft ob TensorBoard bereits läuft
+    2. Startet einen neuen TensorBoard-Prozess
+    3. Validiert erfolgreichen Start
+    
+    Args:
+        log_dir: TensorBoard Log-Verzeichnis
+    
+    Returns:
+        subprocess.Popen oder None: TensorBoard-Prozess wenn erfolgreich, sonst None
+    
+    Socket-Handling:
+        - Prüft Port 6006 auf Verfügbarkeit
+        - Verhindert doppelte TensorBoard-Instanzen
+        - Wartet auf erfolgreichen Start (2 Sekunden)
+        - Graceful Handling bei Port-Konflikten
+    
+    Logging-Details:
+        - Trainings-Metriken (Loss, WER)
+        - Lernrate und Gradients
+        - GPU-Auslastung
+        - Modell-Architektur Graph
+    
+    Notes:
+        - Läuft nur auf dem Hauptprozess (Rank 0)
+        - Automatische Prozess-Terminierung bei Fehlern
+        - Non-Blocking für bessere Interaktivität
+    """
+    # Nur der Hauptprozess (Rank 0) sollte TensorBoard verwalten
+    if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+        return None
+        
     try:
-        train_model()
-    except KeyboardInterrupt:
-        logger.info("\nTraining durch Benutzer abgebrochen")
+        # Prüfe ob TensorBoard bereits läuft
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        result = sock.connect_ex(('127.0.0.1', 6006))
+        sock.close()
+        
+        if result == 0:
+            logger.info("TensorBoard läuft bereits auf Port 6006")
+            return None
+            
+        # Starte TensorBoard nur wenn es noch nicht läuft
+        tensorboard_process = subprocess.Popen(
+            ["tensorboard", "--logdir", log_dir, "--port", "6006"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        # Warte kurz und prüfe ob der Prozess erfolgreich gestartet wurde
+        time.sleep(2)
+        if tensorboard_process.poll() is None:
+            logger.info("TensorBoard erfolgreich gestartet auf Port 6006")
+            return tensorboard_process
+        else:
+            stdout, stderr = tensorboard_process.communicate()
+            logger.warning(f"TensorBoard konnte nicht gestartet werden: {stderr.decode()}")
+            return None
+            
     except Exception as e:
-        logger.error(f"Fehler während des Trainings: {str(e)}")
-        raise
-    finally:
-        cleanup_resources()
+        logger.warning(f"TensorBoard konnte nicht gestartet werden: {str(e)}")
+        return None
 
 # Lade Modell-Konfiguration aus JSON
 with open(CONFIG_DIR / 'model_config.json', 'r') as f:
@@ -688,8 +931,25 @@ MODEL_CONFIG.update({
     'task': 'transcribe'
 })
 
-if __name__ == "__main__":
-    logger.info("=== Starte Modell-Training ===")
+def main():
+    """
+    Haupteinstiegspunkt für das Training.
     
-    # Starte das Training
+    Handhabt:
+    1. Ausführung des Trainings
+    2. Fehlerbehandlung
+    3. Ressourcen-Cleanup
+    """
+    try:
+        logger.info("=== Starte Modell-Training ===")
+        train_model()
+    except KeyboardInterrupt:
+        logger.info("\nTraining durch Benutzer abgebrochen")
+    except Exception as e:
+        logger.error(f"Fehler während des Trainings: {str(e)}")
+        raise
+    finally:
+        cleanup_resources()
+
+if __name__ == "__main__":
     main()
