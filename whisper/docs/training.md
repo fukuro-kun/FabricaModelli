@@ -8,9 +8,73 @@ Dieser Guide dokumentiert den Prozess des Trainings eines solchen spezialisierte
 
 ### 1.1 Projekt-Übersicht
 
-Wir trainieren ein deutsches Spracherkennungsmodell basierend auf OpenAIs Whisper-Architektur, um die Echtzeit-Spracherkennung in RealtimeSTT zu verbessern. Unser Ziel ist es, die Wortfehlerrate (WER) von 4.77% des aktuellen Benchmarks (primeline-whisper-large-v3-turbo-german) zu erreichen oder zu übertreffen. Wir nutzen den flozi00/asr-german-mixed Datensatz mit 970,064 Trainings- und 9,799 Testbeispielen.
+Wir trainieren ein deutsches Spracherkennungsmodell basierend auf OpenAIs Whisper-Architektur, um die Echtzeit-Spracherkennung in RealtimeSTT zu verbessern. Unser Ziel ist es, die Wortfehlerrate (WER) von 4.77% des aktuellen Benchmarks (primeline-whisper-large-v3-turbo-german) zu erreichen oder zu übertreffen.
 
-### 1.2 Hardware-Anforderungen
+### 1.2 Dataset-Struktur
+
+Wir verwenden den `flozi00/asr-german-mixed` Datensatz mit folgender Struktur:
+
+```python
+Dataset({
+    features: ['audio', 'transkription', 'source'],
+    num_rows: 970064  # Training
+})
+
+# Beispiel-Struktur eines einzelnen Datenpunkts:
+{
+    "audio": {
+        "array": numpy.ndarray,      # Audio-Samples als 1D Array
+        "sampling_rate": 16000,      # Sampling-Rate (immer 16kHz)
+        "path": str                  # Original Audiodatei-Pfad
+    },
+    "transkription": str,           # Deutsche Transkription
+    "source": str                   # Datenquelle (z.B. "common_voice")
+}
+```
+
+**WICHTIG**: Diese Struktur ist kritisch für das Training. Insbesondere:
+- Das `audio`-Feld muss ein Dictionary sein
+- `audio["array"]` enthält die Audio-Samples als numpy.ndarray
+- `audio["sampling_rate"]` muss 16000 sein
+- `transkription` enthält den deutschen Text
+
+Zum Debuggen der Dataset-Struktur kann das Skript `src/debug_dataset.py` verwendet werden:
+```bash
+python3 ./src/debug_dataset.py
+```
+
+### 1.2.1 Wichtiger Hinweis zu deutschen Benennungen
+
+⚠️ **ACHTUNG**: Der Datensatz verwendet bewusst deutsche Benennungen!
+
+- Der Key für Transkriptionen heißt `transkription` (nicht `text` oder `transcription`)
+- Diese Benennung ist Teil der Datensatz-Spezifikation und darf NICHT geändert werden
+- Häufige Fehlerquelle: Code, der fälschlicherweise nach `text` oder `transcription` sucht
+
+**Typischer Fehler:**
+```python
+# FALSCH ❌
+text = batch["text"]  # KeyError: 'text'
+
+# RICHTIG ✅
+text = batch["transkription"]
+```
+
+**Validierung der Struktur:**
+```python
+# Korrekte Keys überprüfen
+REQUIRED_KEYS = {"audio", "transkription"}
+REQUIRED_AUDIO_KEYS = {"array", "sampling_rate"}
+
+# Validierung
+missing_keys = REQUIRED_KEYS - set(batch.keys())
+if missing_keys:
+    raise ValueError(f"Dataset-Struktur ungültig. Fehlende Keys: {missing_keys}")
+```
+
+Diese deutsche Benennung ist eine bewusste Designentscheidung und dient als Gedankenstütze für die konsistente Verwendung deutscher Bezeichner im Projekt.
+
+### 1.3 Hardware-Anforderungen
 
 - 2× NVIDIA GPU mit CUDA-Support
   - VRAM: 16GB pro GPU
@@ -24,8 +88,7 @@ Wir trainieren ein deutsches Spracherkennungsmodell basierend auf OpenAIs Whispe
   - ~1.5TB HuggingFace Cache
   - ~1.5TB Zusätzlicher Speicher
 
-
-### 1.3 Verzeichnisstruktur
+### 1.4 Verzeichnisstruktur
 
 ```
 ${BASE_DIR}/
@@ -421,9 +484,9 @@ Diese Konfiguration ermöglicht:
    - Beschleunigt Training
 
 3. **Gradient Checkpointing:**
-   - Spart ~40% VRAM
-   - Kleine Performance-Einbuße
-   - Ermöglicht größere Batches
+   - Aktiviert für alle Transformer-Layer
+   - VRAM-Einsparung: ~40%
+   - Leicht erhöhte Verarbeitungszeit (~10%)
 
 ### 4.2 Training starten
 
@@ -730,5 +793,9 @@ training_args = Seq2SeqTrainingArguments(
     push_to_hub=True,
     report_to="wandb",
 )
+
+```
+
+```
 
 ```

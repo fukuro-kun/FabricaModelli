@@ -340,7 +340,7 @@ def cleanup_gpu_memory():
     if is_main_process():
         logger.debug(f"GPU Memory bereinigt - Verfügbar: {torch.cuda.memory_allocated()/1024**3:.1f}GB")
 
-def prepare_dataset(batch, processor):
+def prepare_dataset(batch: dict, processor: "WhisperProcessor") -> dict:
     """
     Bereitet einen Batch für das Training vor.
     
@@ -350,15 +350,20 @@ def prepare_dataset(batch, processor):
     3. Handhabt Padding und Attention Masks
     
     Args:
-        batch (dict): Ein Batch aus dem Dataset mit 'audio' und 'text' Feldern
+        batch (dict): Ein Batch aus dem Dataset mit:
+            - audio (dict): Audio-Daten mit:
+                - array (np.ndarray): Rohe Audio-Samples
+                - sampling_rate (int): Sampling Rate
+            - text (str): Transkriptions-Text
         processor (WhisperProcessor): Der Whisper Tokenizer und Feature Extractor
     
     Returns:
         dict: Verarbeiteter Batch mit:
-            - input_features: Prozessierte Audio-Features
-            - labels: Tokenisierte Text-Labels
-            - attention_mask: Attention Mask für die Features
-            - decoder_attention_mask: Attention Mask für den Decoder
+            - input_features (np.ndarray): Prozessierte Audio-Features [batch_size, n_mels, time]
+            - labels (np.ndarray): Tokenisierte Text-Labels [batch_size, seq_len]
+            - attention_mask (np.ndarray): Attention Mask für Features [batch_size, n_mels, time]
+            - decoder_attention_mask (np.ndarray): Attention Mask für Decoder [batch_size, seq_len]
+            - is_long_sequence (list[bool]): Flag für lange Sequenzen [batch_size]
     
     Notes:
         - Unterstützt Audio-Längen von 4-43 Sekunden
@@ -381,49 +386,78 @@ def prepare_dataset(batch, processor):
     try:
         # 1. Audio-Verarbeitung
         audio = batch["audio"]
-        audio_array = audio["array"]
-        sampling_rate = audio.get("sampling_rate", 16000)
         
-        # Berechne Audio-Länge in Sekunden
-        audio_length = len(audio_array) / sampling_rate
-        is_long_sequence = audio_length > 32
-        
-        # 2. Resampling (nur wenn nötig)
-        if sampling_rate != 16000:
-            audio_array = librosa.resample(
-                y=audio_array,
-                orig_sr=sampling_rate,
-                target_sr=16000,
-                res_type="kaiser_best"
-            )
+        # Prüfe ob wir einen Batch oder ein einzelnes Sample verarbeiten
+        if isinstance(audio, list):
+            # Batch-Verarbeitung
+            audio_arrays = [a["array"] for a in audio]
+            sampling_rates = [a["sampling_rate"] for a in audio]
             
-        # 3. Feature-Extraktion mit automatischem Padding
-        extracted = processor(
-            audio=audio_array, 
-            sampling_rate=16000,
-            return_tensors="pt",  # PyTorch-Tensoren zurückgeben
-            padding=True,  # Essenziell für Batch-Verarbeitung
-            return_attention_mask=True 
-        )
+            # Prüfe Sampling Rates und führe Resampling durch wenn nötig
+            if any(sr != 16000 for sr in sampling_rates):
+                # Resampling für jeden Audio-Array im Batch
+                audio_arrays = [
+                    librosa.resample(y=arr, orig_sr=sr, target_sr=16000, res_type="kaiser_best")
+                    if sr != 16000 else arr
+                    for arr, sr in zip(audio_arrays, sampling_rates)
+                ]
+            
+            # Berechne Audio-Längen für jeden Array im Batch
+            audio_lengths = [len(arr) / 16000 for arr in audio_arrays]
+            is_long_sequence = [length > 32 for length in audio_lengths]  # Liste von bool für jeden Array
+            
+            # Feature-Extraktion für den gesamten Batch
+            extracted = processor(
+                audio=audio_arrays,
+                sampling_rate=16000,
+                return_tensors="pt",
+                padding=True,
+                return_attention_mask=True
+            )
+        else:
+            # Einzelnes Sample
+            audio_array = audio["array"]
+            sampling_rate = audio["sampling_rate"]
+            
+            # Resampling (nur wenn nötig)
+            if sampling_rate != 16000:
+                audio_array = librosa.resample(
+                    y=audio_array,
+                    orig_sr=sampling_rate,
+                    target_sr=16000,
+                    res_type="kaiser_best"
+                )
+            
+            # Berechne Audio-Länge in Sekunden
+            audio_length = len(audio_array) / 16000
+            is_long_sequence = [audio_length > 32]  # Einzelner bool in Liste
+            
+            # Feature-Extraktion
+            extracted = processor(
+                audio=audio_array,
+                sampling_rate=16000,
+                return_tensors="pt",
+                padding=True,
+                return_attention_mask=True
+            )
         
         # Tokenisiere Text mit Padding
-        with processor.as_target_processor():
-            labels = processor(
-                text=batch["transkription"],
-                return_tensors="pt",
-                padding=True  # Aktiviere Padding für Labels
-            ).input_ids[0]
+        labels = processor.tokenizer(
+            text=batch["transkription"],
+            padding=True,
+            return_tensors="pt"
+        )
         
-        # 4. Feature-Typ bestimmen
-        # Bestimme Feature-Typ (input_values oder input_features)
+        # Feature-Typ bestimmen (input_values oder input_features)
         ft = "input_values" if hasattr(extracted, "input_values") else "input_features"
         
-        # 5. Batch erstellen
+        # Batch erstellen mit korrekten numpy Konvertierungen
         processed_data = {
-            "input_features": getattr(extracted, ft)[0],
-            "attention_mask": extracted.attention_mask[0],
-            "labels": processor(text=batch["transkription"]).input_ids,
-            "is_long_sequence": is_long_sequence  # Für Batch-Optimierung
+            "input_features": getattr(extracted, ft).numpy(),  # [batch_size, n_mels, time]
+            "attention_mask": extracted.attention_mask.numpy(),  # [batch_size, seq_len]
+            "labels": labels.input_ids.numpy(),  # [batch_size, seq_len]
+            "decoder_attention_mask": labels.attention_mask.numpy(),  # [batch_size, seq_len]
+            "is_long_sequence": is_long_sequence  # list[bool]
         }
         
         return processed_data
@@ -746,7 +780,7 @@ def train_model():
             tensorboard_process.terminate()
             logger.info("TensorBoard beendet")
             
-def compute_metrics(pred):
+def compute_metrics(pred: "Seq2SeqPredictionOutput") -> dict:
     """
     Berechnet die Word Error Rate (WER) für die Vorhersagen.
     
@@ -757,11 +791,11 @@ def compute_metrics(pred):
     
     Args:
         pred (Seq2SeqPredictionOutput): Enthält:
-            - predictions: Modell-Vorhersagen (Token-IDs)
-            - label_ids: Referenz-Labels (Token-IDs)
+            - predictions (torch.Tensor): Modell-Vorhersagen [batch_size, seq_len]
+            - label_ids (torch.Tensor): Referenz-Labels [batch_size, seq_len]
     
     Returns:
-        dict: {"wer": float} - Word Error Rate
+        dict: {"wer": float} - Word Error Rate als float zwischen 0 und 1
     
     Notes:
         - Benchmark-Ziel: 4.77% WER (primeline-whisper-large-v3-turbo-german)
@@ -793,7 +827,11 @@ def compute_metrics(pred):
     
     return {"wer": wer}
 
-def evaluate_on_benchmark(model, processor, device="cuda"):
+def evaluate_on_benchmark(
+    model: "WhisperForConditionalGeneration",
+    processor: "WhisperProcessor",
+    device: str = "cuda"
+) -> float:
     """
     Evaluiert das Modell auf einem Benchmark-Dataset.
     
@@ -808,7 +846,7 @@ def evaluate_on_benchmark(model, processor, device="cuda"):
         device (str, optional): Gerät für Inferenz. Defaults to "cuda"
     
     Returns:
-        float: Berechnete Word Error Rate (WER)
+        float: Berechnete Word Error Rate (WER) als float zwischen 0 und 1
     
     Notes:
         - Vergleicht mit primeline-whisper-large-v3-turbo-german (4.77% WER)
